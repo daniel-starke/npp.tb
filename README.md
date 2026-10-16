@@ -156,3 +156,13 @@ Toolchain setup (`rust-toolchain.toml` installs the targets and components autom
 
 MIT, see [LICENSE](LICENSE). The plugin contains third-party works under the MIT license, see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## AI Assistance Disclaimer
+
+This software was developed with the assistance of AI-based tools.
+All design decisions and final content remain the responsibility of the human author.
+
+Users should be aware that AI-assisted code generation may introduce subtle errors,
+security vulnerabilities, or suboptimal patterns that standard review processes
+might not catch. Independent review and thorough testing before use in production
+environments is strongly recommended.
