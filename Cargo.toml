@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/npp", "crates/npp-build", "crates/npp-toolbox", "crates/xtask"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Daniel Starke"]
+repository = "https://github.com/daniel-starke/npp.tb"
+license = "MIT"
+
+[workspace.dependencies]
+npp = { path = "crates/npp" }
+npp-build = { path = "crates/npp-build" }
+windows-sys = { version = "0.61" }
+unicode-width = { version = "0.2", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
+resvg = { version = "0.48", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+# Notepad++ cannot handle a Rust panic crossing the plugin ABI. Aborting is the only
+# sound option and also keeps unwinding and backtrace machinery out of the DLL.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1
+lto = "fat"
+strip = true
+debug = false

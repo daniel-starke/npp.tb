@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Clippy runs the build script, which compiles the resource script with windres.
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends gcc-mingw-w64
+      # rust-toolchain.toml selects the components and the Windows GNU targets.
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target i686-pc-windows-gnu -- -D warnings
+
+  build:
+    name: Build ${{ matrix.architecture }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-gnu
+            cargo_alias: build-x64
+          - architecture: x86
+            target: i686-pc-windows-gnu
+            cargo_alias: build-x86
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends gcc-mingw-w64
+      - run: rustup toolchain install
+      - run: cargo ${{ matrix.cargo_alias }}
+      - name: Check that only Windows system DLLs are imported
+        run: |
+          imports=$(x86_64-w64-mingw32-objdump -p target/${{ matrix.target }}/release/NppToolBox.dll | sed -n 's/^\s*DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
+          echo "$imports"
+          unexpected=$(echo "$imports" | grep -vE '^(kernel32|user32|gdi32|ntdll|msvcrt|bcryptprimitives|api-ms-win-[a-z0-9-]+)\.dll$' || true)
+          test -z "$unexpected" || { echo "Unexpected runtime dependencies: $unexpected"; exit 1; }
+      - name: Package
+        run: |
+          mkdir -p package/NppToolBox
+          cp target/${{ matrix.target }}/release/NppToolBox.dll LICENSE README.md THIRD-PARTY-NOTICES.md package/NppToolBox/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NppToolBox-${{ matrix.architecture }}
+          path: package/

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+	<!-- Style: npp_build::icon_style::DEFAULT, see crates/npp-toolbox/icons/README.md -->
+	<path d="M5.5 2.5h-2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-10a1 1 0 0 0-1-1h-2" fill="none" stroke="currentColor"/>
+	<rect x="5.5" y="1.5" width="5" height="2" rx="1" fill="none" stroke="currentColor"/>
+	<path d="M6.5 7.5l-2 2 2 2M9.5 7.5l2 2-2 2" fill="none" stroke="#0078D4"/>
+</svg>

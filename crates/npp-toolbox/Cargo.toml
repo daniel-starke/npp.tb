@@ -1,0 +1,25 @@
+[package]
+name = "npp-toolbox"
+description = "NppToolBox: a Notepad++ plugin with text editing helper functions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+# Notepad++ loads plugins/<Name>/<Name>.dll, so the library name is the plugin name.
+name = "NppToolBox"
+crate-type = ["cdylib"]
+
+[dependencies]
+npp.workspace = true
+unicode-width.workspace = true
+pulldown-cmark.workspace = true
+
+[build-dependencies]
+npp-build.workspace = true
+
+[lints]
+workspace = true
