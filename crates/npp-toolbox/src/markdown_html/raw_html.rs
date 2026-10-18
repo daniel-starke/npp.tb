@@ -40,6 +40,92 @@ pub fn write_raw_html(
 	output.push_str(&html[written..]);
 }
 
+/// What a plain text view keeps of raw HTML.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HtmlPart {
+	Text(String),
+	LineBreak,
+	Image { source: String },
+}
+
+/// End tags (and `<br>`) after which text continues on a new line.
+const LINE_BREAKING_TAGS: [&str; 17] = [
+	"br",
+	"p",
+	"div",
+	"li",
+	"tr",
+	"h1",
+	"h2",
+	"h3",
+	"h4",
+	"h5",
+	"h6",
+	"blockquote",
+	"table",
+	"pre",
+	"details",
+	"summary",
+	"hr",
+];
+
+/// The text of `html` with collapsed whitespace and decoded entities, line breaks after block
+/// elements and the `src` of `<img>` tags. Other tags and comments are dropped.
+pub fn plain_text_parts(html: &str) -> Vec<HtmlPart> {
+	let mut parts = Vec::new();
+	let push_text = |text: &str, parts: &mut Vec<HtmlPart>| {
+		let text = decode_entities(text);
+		let mut collapsed = String::with_capacity(text.len());
+		for (index, word) in text.split_ascii_whitespace().enumerate() {
+			if index > 0 || text.starts_with(|character: char| character.is_ascii_whitespace()) {
+				collapsed.push(' ');
+			}
+			collapsed.push_str(word);
+		}
+		if text.ends_with(|character: char| character.is_ascii_whitespace())
+			&& !collapsed.is_empty()
+		{
+			collapsed.push(' ');
+		}
+		if !collapsed.is_empty() {
+			parts.push(HtmlPart::Text(collapsed));
+		}
+	};
+	let mut rest = html;
+	while let Some(tag_start) = rest.find('<') {
+		push_text(&rest[..tag_start], &mut parts);
+		let tag = &rest[tag_start..];
+		let tag_end = if tag.starts_with("<!--") {
+			tag.find("-->").map(|end| end + 3)
+		} else {
+			tag.find('>').map(|end| end + 1)
+		};
+		let Some(tag_end) = tag_end else {
+			push_text(tag, &mut parts);
+			return parts;
+		};
+		let after_bracket = &tag[1..];
+		let name = after_bracket.strip_prefix('/').unwrap_or(after_bracket);
+		if starts_with_tag_name(after_bracket, "img") {
+			if let Some(source) = source_attribute(tag, "<img".len()) {
+				let source = decode_entities(&tag[source.value]);
+				parts.push(HtmlPart::Image { source });
+			}
+		} else if LINE_BREAKING_TAGS
+			.iter()
+			.any(|&line_breaking| starts_with_tag_name(name, line_breaking))
+			&& (after_bracket.starts_with('/')
+				|| starts_with_tag_name(name, "br")
+				|| starts_with_tag_name(name, "hr"))
+		{
+			parts.push(HtmlPart::LineBreak);
+		}
+		rest = &tag[tag_end..];
+	}
+	push_text(rest, &mut parts);
+	parts
+}
+
 /// `text` starts with `name` (ASCII case-insensitive) followed by whitespace, `>`, `/` or the
 /// end, like the GFM tag filter checks.
 fn starts_with_tag_name(text: &str, name: &str) -> bool {
@@ -169,6 +255,28 @@ mod tests {
 			source.ends_with(".png").then(|| format!("data:{source}"))
 		});
 		output
+	}
+
+	#[test]
+	fn extracts_plain_text_parts() {
+		use HtmlPart::{Image, LineBreak, Text};
+		assert_eq!(
+			plain_text_parts(
+				"<p align=\"center\">\n  <img src=\"a&amp;b.png\" alt=x>\n</p>\nTom &amp;  Jerry<br/>end<!-- <b>no</b> -->"
+			),
+			vec![
+				Image { source: "a&b.png".to_owned() },
+				LineBreak,
+				Text(" Tom & Jerry".to_owned()),
+				LineBreak,
+				Text("end".to_owned()),
+			]
+		);
+		assert_eq!(plain_text_parts("a < b"), vec![Text("a ".to_owned()), Text("< b".to_owned())]);
+		assert_eq!(
+			plain_text_parts("<details><summary>More</summary>"),
+			vec![Text("More".to_owned()), LineBreak]
+		);
 	}
 
 	#[test]

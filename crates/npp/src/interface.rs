@@ -2186,12 +2186,66 @@ pub mod plugin_interface {
 	pub const menuItemSize: u32 = 64;
 }
 
+/// Constants from `dockingResource.h`.
+pub mod docking_resource {
+	pub const IDD_PLUGIN_DLG: u32 = 103;
+	pub const IDC_EDIT1: u32 = 1000;
+	pub const IDB_CLOSE_DOWN: u32 = 137;
+	pub const IDB_CLOSE_UP: u32 = 138;
+	pub const IDD_CONTAINER_DLG: u32 = 139;
+	pub const IDC_TAB_CONT: u32 = 1027;
+	pub const IDC_CLIENT_TAB: u32 = 1028;
+	pub const IDC_BTN_CAPTION: u32 = 1050;
+	pub const DMM_MSG: u32 = 20480;
+	pub const DMM_CLOSE: u32 = 20481;
+	pub const DMM_DOCK: u32 = 20482;
+	pub const DMM_FLOAT: u32 = 20483;
+	pub const DMM_DOCKALL: u32 = 20484;
+	pub const DMM_FLOATALL: u32 = 20485;
+	pub const DMM_MOVE: u32 = 20486;
+	pub const DMM_UPDATEDISPINFO: u32 = 20487;
+	pub const DMM_DROPDATA: u32 = 20490;
+	pub const DMM_MOVE_SPLITTER: u32 = 20491;
+	pub const DMM_CANCEL_MOVE: u32 = 20492;
+	pub const DMM_LBUTTONUP: u32 = 20493;
+	pub const DMN_FIRST: u32 = 1050;
+	pub const DMN_CLOSE: u32 = 1051;
+	pub const DMN_DOCK: u32 = 1052;
+	pub const DMN_FLOAT: u32 = 1053;
+	pub const DMN_SWITCHIN: u32 = 1054;
+	pub const DMN_SWITCHOFF: u32 = 1055;
+	pub const DMN_FLOATDROPPED: u32 = 1056;
+}
+
+/// Constants from `Docking.h`.
+pub mod docking {
+	pub const CONT_LEFT: u32 = 0;
+	pub const CONT_RIGHT: u32 = 1;
+	pub const CONT_TOP: u32 = 2;
+	pub const CONT_BOTTOM: u32 = 3;
+	pub const DOCKCONT_MAX: u32 = 4;
+	pub const DWS_ICONTAB: u32 = 1;
+	pub const DWS_ICONBAR: u32 = 2;
+	pub const DWS_ADDINFO: u32 = 4;
+	pub const DWS_USEOWNDARKMODE: u32 = 8;
+	pub const DWS_PARAMSALL: u32 = 7;
+	pub const DWS_DF_CONT_LEFT: u32 = 0;
+	pub const DWS_DF_CONT_RIGHT: u32 = 268435456;
+	pub const DWS_DF_CONT_TOP: u32 = 536870912;
+	pub const DWS_DF_CONT_BOTTOM: u32 = 805306368;
+	pub const DWS_DF_FLOATING: u32 = 2147483648;
+	pub const HIT_TEST_THICKNESS: u32 = 20;
+	pub const SPLITTER_WIDTH: u32 = 4;
+}
+
 // Struct declarations of this version. `ffi.rs` mirrors them by hand and must be reviewed
 // whenever one of the following lines changes.
 // struct Sci_CharacterRangeFull { Sci_Position cpMin; Sci_Position cpMax; }
 // struct Sci_TextRangeFull { struct Sci_CharacterRangeFull chrg; char *lpstrText; }
 // struct Sci_NotifyHeader { void *hwndFrom; uptr_t idFrom; unsigned int code; }
+// struct SCNotification { Sci_NotifyHeader nmhdr; Sci_Position position; int ch; int modifiers; int modificationType; const char *text; Sci_Position length; Sci_Position linesAdded; int message; uptr_t wParam; sptr_t lParam; Sci_Position line; int foldLevelNow; int foldLevelPrev; int margin; int listType; int x; int y; int token; Sci_Position annotationLinesAdded; int updated; int listCompletionMethod; int characterSource; }
 // struct toolbarIconsWithDarkMode { HBITMAP hToolbarBmp; HICON hToolbarIcon; HICON hToolbarIconDarkMode; }
 // struct NppData { HWND _nppHandle; HWND _scintillaMainHandle; HWND _scintillaSecondHandle; }
 // struct ShortcutKey { bool _isCtrl; bool _isAlt; bool _isShift; UCHAR _key; }
 // struct FuncItem { wchar_t _itemName[menuItemSize]; PFUNCPLUGINCMD _pFunc; int _cmdID; bool _init2Check; ShortcutKey *_pShKey; }
+// struct DockedWidgetData { HWND hClient; const wchar_t* pszName; int dlgID; UINT uMask; HICON hIconTab; const wchar_t* pszAddInfo; RECT rcFloat; int iPrevCont; const wchar_t* pszModuleName; }

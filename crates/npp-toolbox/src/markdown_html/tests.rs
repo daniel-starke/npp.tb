@@ -1,6 +1,10 @@
 use super::*;
 
 fn render_with(markdown: &str, styling: Styling) -> String {
+	render_with_lines(markdown, styling, false)
+}
+
+fn render_with_lines(markdown: &str, styling: Styling, annotates_source_lines: bool) -> String {
 	let mut replace_image_source = |syntax: ImageSyntax, source: &str| {
 		source.ends_with(".png").then(|| format!("data:image/png;{syntax:?}"))
 	};
@@ -14,6 +18,8 @@ fn render_with(markdown: &str, styling: Styling) -> String {
 		_ => Vec::new(),
 	};
 	let mut options = RenderOptions {
+		annotates_source_lines,
+		is_dark: false,
 		styling,
 		replace_image_source: &mut replace_image_source,
 		highlight_code: &mut highlight_code,
@@ -113,11 +119,46 @@ fn renders_alerts_like_github() {
 	let html = render("> [!WARNING]\n> Careful");
 	assert!(
 		html.starts_with(
-			"<div class=\"markdown-alert markdown-alert-warning\">\n<p class=\"markdown-alert-title\"><svg"
+			"<div class=\"markdown-alert markdown-alert-warning\">\n<p class=\"markdown-alert-title\"><img class=\"octicon mr-2\" src=\"data:image/svg+xml;base64,"
 		),
 		"{html}"
 	);
-	assert!(html.ends_with("</svg>Warning</p>\n<p>Careful</p>\n</div>\n"), "{html}");
+	assert!(
+		html.ends_with(
+			" width=\"16\" height=\"16\" alt=\"\" aria-hidden=\"true\">Warning</p>\n<p>Careful</p>\n</div>\n"
+		),
+		"{html}"
+	);
+}
+
+#[test]
+fn colors_alert_icons_for_the_theme() {
+	let icon_uri = |color: &str| {
+		let svg = AlertKind::Note.icon_svg(color).into_bytes();
+		EmbeddedImage { media_type: "image/svg+xml", bytes: svg }.data_uri()
+	};
+	let render_note = |styling: Styling, is_dark: bool| {
+		let mut replace_image_source = |_: ImageSyntax, _: &str| None;
+		let mut highlight_code = |_: &str, _: &str| Vec::new();
+		render_markdown(
+			"> [!NOTE]\n> n",
+			&mut RenderOptions {
+				styling,
+				replace_image_source: &mut replace_image_source,
+				highlight_code: &mut highlight_code,
+				annotates_source_lines: false,
+				is_dark,
+			},
+		)
+	};
+	assert!(render_note(Styling::StyleSheet, false).contains(&icon_uri("#0969da")));
+	assert!(render_note(Styling::StyleSheet, true).contains(&icon_uri("#4493f8")));
+	let inline = render_note(Styling::Inline, true);
+	let inline_icon = format!(
+		"<img style=\"vertical-align:text-bottom;margin-right:8px\" src=\"{}\"",
+		icon_uri("#0969da")
+	);
+	assert!(inline.contains(&inline_icon), "{inline}");
 }
 
 #[test]
@@ -284,6 +325,8 @@ fn renders_random_input_without_panicking() {
 			.collect();
 		render(&markdown);
 		render_with(&markdown, Styling::Inline);
+		render_with_lines(&markdown, Styling::StyleSheet, true);
+		crate::markdown_rtf::tests::render(&markdown);
 	}
 }
 
@@ -371,4 +414,24 @@ fn renders_random_math_without_panicking() {
 		math::push_math(&mut output, &latex, next_random() % 2 == 0);
 		assert!(output.ends_with("</math>"));
 	}
+}
+
+#[test]
+fn annotates_blocks_with_source_lines() {
+	let html = render_with_lines(
+		"# Title\n\npara\ngraph\n\n- a\n- b\n\n|x|\n|-|\n|1|\n\n```\ncode\n```\n",
+		Styling::StyleSheet,
+		true,
+	);
+	for expected in [
+		"<h1 id=\"title\" data-line=\"0\">",
+		"<p data-line=\"2\">para",
+		"<ul data-line=\"5\">\n<li data-line=\"5\">a</li>\n<li data-line=\"6\">b",
+		"<table data-line=\"8\">",
+		"<tr data-line=\"10\">",
+		"<pre data-line=\"12\">",
+	] {
+		assert!(html.contains(expected), "{expected} missing in {html}");
+	}
+	assert!(!render("para").contains("data-line"));
 }

@@ -11,7 +11,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::ffi::ToolbarIconsWithDarkMode;
-use crate::icon::{IconImage, ToolbarIcon, best_image_for_size};
+use crate::icon::ToolbarIcon;
+use crate::svg::render_bgra;
+
+/// A square image in 32-bit BGRA order with straight alpha, rows top-down.
+struct IconImage {
+	size: u32,
+	bgra: Vec<u8>,
+}
+
+impl IconImage {
+	fn render(svg: &str, size: u32) -> Option<Self> {
+		Some(Self { size, bgra: render_bgra(svg, size)? })
+	}
+}
 
 /// `bitmap_size` is used for the "Standard icons" toolbar set, `icon_size` for the Fluent sets.
 /// Returns `None` if any handle could not be created. Nothing is leaked in that case.
@@ -20,16 +33,16 @@ pub(crate) fn create_toolbar_icon_handles(
 	bitmap_size: u32,
 	icon_size: u32,
 ) -> Option<ToolbarIconsWithDarkMode> {
-	let light_bitmap_image = best_image_for_size(icon.light, bitmap_size)?;
-	let light_icon_image = best_image_for_size(icon.light, icon_size)?;
-	let dark_icon_image = best_image_for_size(icon.dark, icon_size)?;
+	let light_bitmap_image = IconImage::render(icon.light, bitmap_size)?;
+	let light_icon_image = IconImage::render(icon.light, icon_size)?;
+	let dark_icon_image = IconImage::render(icon.dark, icon_size)?;
 
-	let toolbar_bitmap = create_opaque_bitmap(light_bitmap_image)?;
-	let Some(toolbar_icon) = create_icon(light_icon_image) else {
+	let toolbar_bitmap = create_opaque_bitmap(&light_bitmap_image)?;
+	let Some(toolbar_icon) = create_icon(&light_icon_image) else {
 		delete_bitmap(toolbar_bitmap);
 		return None;
 	};
-	let Some(toolbar_icon_dark_mode) = create_icon(dark_icon_image) else {
+	let Some(toolbar_icon_dark_mode) = create_icon(&dark_icon_image) else {
 		delete_bitmap(toolbar_bitmap);
 		// SAFETY: The icon was created above and never handed out.
 		unsafe { DestroyIcon(toolbar_icon) };
@@ -47,7 +60,9 @@ fn create_opaque_bitmap(image: &IconImage) -> Option<HBITMAP> {
 	let background_bgr = [(background >> 16) as u8, (background >> 8) as u8, background as u8];
 	let pixels: Vec<u8> = image
 		.bgra
-		.chunks_exact(4)
+		.as_chunks::<4>()
+		.0
+		.iter()
 		.flat_map(|pixel| {
 			let alpha = u32::from(pixel[3]);
 			let blend = |foreground: u8, background: u8| {
@@ -66,7 +81,7 @@ fn create_opaque_bitmap(image: &IconImage) -> Option<HBITMAP> {
 }
 
 fn create_icon(image: &IconImage) -> Option<HICON> {
-	let color = create_dib_section(image.size, image.bgra)?;
+	let color = create_dib_section(image.size, &image.bgra)?;
 	// With a 32-bit color bitmap the alpha channel defines transparency and the AND mask must be
 	// all zeros. Monochrome rows are padded to 16 bits.
 	let mask_bytes = vec![0u8; image.size.div_ceil(16) as usize * 2 * image.size as usize];

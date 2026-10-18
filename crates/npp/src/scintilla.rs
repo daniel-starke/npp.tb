@@ -220,7 +220,13 @@ impl Scintilla {
 		let mut request =
 			TextRangeFull { min: 0, max: length, text: styled_text.as_mut_ptr().cast() };
 		self.send_message(scintilla_message::GET_STYLED_TEXT_FULL, 0, &raw mut request as LPARAM);
-		styled_text.chunks_exact(2).take(length as usize).map(|pair| pair[1]).collect()
+		styled_text
+			.as_chunks::<2>()
+			.0
+			.iter()
+			.take(length as usize)
+			.map(|&[_, style]| style)
+			.collect()
 	}
 
 	/// The lexer's tags of `style`, e.g. `literal string`. Empty if the lexer has none.

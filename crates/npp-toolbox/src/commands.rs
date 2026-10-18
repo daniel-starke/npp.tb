@@ -3,10 +3,11 @@
 use std::path::Path;
 
 use npp::clipboard::{ClipboardContent, set_clipboard};
+use npp::ffi::SciNotification;
 use npp::ffi::language;
 use npp::ini_file::IniFile;
 use npp::input_dialog::ask_for_number;
-use npp::{MessageKind, Notepad, Scintilla};
+use npp::{Command, MessageKind, Notepad, Scintilla};
 
 use crate::PLUGIN_NAME;
 use crate::clipboard_html::clipboard_html;
@@ -20,7 +21,9 @@ use crate::markdown_table::{
 };
 use crate::rewrap::{DocumentSyntax, RewrapSettings, paragraph_at, rewrap_range};
 use crate::settings::{self, SETTINGS_FILE_NAME, Setting};
-const MARKDOWN_EXTENSIONS: [&str; 7] = ["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt"];
+use crate::viewer;
+pub(crate) const MARKDOWN_EXTENSIONS: [&str; 7] =
+	["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt"];
 
 pub fn realign_markdown_table(notepad: &Notepad) {
 	let editor = notepad.current_scintilla();
@@ -171,6 +174,21 @@ pub fn copy_as_html(notepad: &Notepad) {
 	}
 }
 
+/// Shows or hides the live preview of the active document.
+pub fn markdown_viewer(notepad: &Notepad) {
+	viewer::toggle(notepad);
+}
+
+pub fn on_notification(notepad: &Notepad, notification: &SciNotification) {
+	viewer::on_notification(notepad, notification);
+}
+
+/// The `[Toolbar]` settings select the icons. Commands without a setting always show theirs.
+pub fn shows_toolbar_icon(notepad: &Notepad, command: &Command) -> bool {
+	settings::toolbar_setting(command.menu_name)
+		.is_none_or(|setting| read_setting(settings_file(notepad).as_ref(), setting) == 1)
+}
+
 /// Opens the settings file in Notepad++. A missing file is created with all defaults and a
 /// description of every setting. Settings missing in an existing file are added.
 pub fn settings(notepad: &Notepad) {
@@ -236,13 +254,13 @@ fn selected_lines(editor: &Scintilla) -> std::ops::Range<usize> {
 	first_line..last_line + 1
 }
 
-fn settings_file(notepad: &Notepad) -> Option<IniFile> {
+pub(crate) fn settings_file(notepad: &Notepad) -> Option<IniFile> {
 	notepad
 		.plugins_config_directory()
 		.map(|directory| IniFile::new(&directory.join(SETTINGS_FILE_NAME)))
 }
 
-fn read_setting(file: Option<&IniFile>, setting: &Setting) -> u32 {
+pub(crate) fn read_setting(file: Option<&IniFile>, setting: &Setting) -> u32 {
 	file.map_or(setting.default, |file| {
 		setting.valid_or_default(file.read_u32(setting.section, setting.key, setting.default))
 	})
@@ -283,6 +301,8 @@ fn render(notepad: &Notepad, markdown: &str, styling: Styling) -> String {
 	render_markdown(
 		markdown,
 		&mut RenderOptions {
+			annotates_source_lines: false,
+			is_dark: false,
 			styling,
 			replace_image_source: &mut replace_image_source,
 			highlight_code: &mut highlight_code,

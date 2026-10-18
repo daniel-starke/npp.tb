@@ -4,5 +4,27 @@ M.N.P
 | +---- minor: increased if syntax/semantic breaking changes were applied
 +------ major: increased if elementary changes (from user's point of view) were made
 
+2.0.0 (2026-10-18)
+ - added: Markdown Viewer (Ctrl+Alt+M, toolbar) with a live preview of the active document
+ - added: viewer docked as side panel or detached to a maximizable window (Detach/Dock button)
+ - added: viewer option to follow the caret and mark the selected blocks (Follow caret)
+ - added: viewer engines Microsoft Edge WebView2 (default if available) and RichEdit (fallback)
+ - added: WebView2 used via WebView2Loader.dll next to NppToolBox.dll or the installed runtime
+ - added: viewer engine EdgeHTML of the legacy Microsoft Edge (Engine=2)
+ - added: links in the viewer opened in the browser, Notepad++ or the default application
+ - added: target of the hovered link shown in a bar below the viewer
+ - added: copy from the viewer with Ctrl+C and the context menu
+ - added: viewer in GitHub's dark style in Notepad++'s dark mode
+ - added: settings section [Viewer] (Engine, FollowCaret, Detached, UpdateDelay)
+ - added: settings section [Toolbar] to show or hide each toolbar icon
+ - changed: Rust 1.95 or newer required to build
+ - changed: windows-core added as runtime dependency (COM interfaces of WebView2)
+ - changed: toolbar icons rendered at runtime in the exact size of the toolbar and DPI
+ - changed: resvg added as runtime dependency (SVG icon rendering)
+ - fixed: alert icons missing in Copy as HTML (LibreOffice, Office) and in the RichEdit viewer
+ - fixed: pictures in the RichEdit viewer drawn over the paragraph above and cut off at the bottom
+ - fixed: Rewrap joining the alert marker line (> [!NOTE]) with the alert text
+ - fixed: image embedding test using an invalid file: URI on Windows
+
 1.0.0 (2026-10-16)
  - first release

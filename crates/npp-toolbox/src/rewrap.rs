@@ -142,6 +142,9 @@ fn classify_lines<'a>(lines: &[&'a str], syntax: DocumentSyntax) -> Vec<LineRole
 				|| is_heading(rest)
 				|| rest.starts_with('<')
 				|| is_link_reference_definition(rest)
+				|| (syntax == DocumentSyntax::Markdown
+					&& parts.base_prefix.contains('>')
+					&& is_alert_marker(rest))
 				|| (syntax == DocumentSyntax::Code && is_block_comment_delimiter_line(lines[index]))
 				|| (syntax == DocumentSyntax::Markdown
 					&& parts.list_marker.is_empty()
@@ -272,13 +275,12 @@ fn trimmed_end(mut line: String) -> String {
 fn parse_line(line: &str, syntax: DocumentSyntax) -> LineParts<'_> {
 	let indentation_length = whitespace_length(line);
 	let mut position = indentation_length;
-	if syntax == DocumentSyntax::Code {
-		if let Some(marker_length) =
+	if syntax == DocumentSyntax::Code
+		&& let Some(marker_length) =
 			comment_marker_length(&line[position..], indentation_length > 0)
-		{
-			position += marker_length;
-			position += whitespace_length(&line[position..]);
-		}
+	{
+		position += marker_length;
+		position += whitespace_length(&line[position..]);
 	}
 	while line[position..].starts_with('>') {
 		position += 1;
@@ -381,6 +383,16 @@ fn is_link_reference_definition(text: &str) -> bool {
 	text.starts_with('[') && text.contains("]:")
 }
 
+/// A GitHub alert marker like `[!NOTE]`. It only starts an alert alone on its line.
+fn is_alert_marker(text: &str) -> bool {
+	let Some(kind) = text.trim().strip_prefix("[!").and_then(|rest| rest.strip_suffix(']')) else {
+		return false;
+	};
+	["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"]
+		.into_iter()
+		.any(|alert_kind| alert_kind.eq_ignore_ascii_case(kind))
+}
+
 fn is_block_comment_delimiter_line(line: &str) -> bool {
 	line.trim_start().starts_with("/*") || line.trim_end().ends_with("*/")
 }
@@ -476,6 +488,28 @@ mod tests {
 		assert_eq!(
 			rewrap_all("> > alpha beta gamma", 14, DocumentSyntax::Markdown),
 			"> > alpha beta\n> > gamma"
+		);
+	}
+
+	#[test]
+	fn keeps_alert_markers_on_their_own_line() {
+		assert_eq!(
+			rewrap_all("> [!NOTE]\n> alpha beta\n> gamma", 80, DocumentSyntax::Markdown),
+			"> [!NOTE]\n> alpha beta gamma"
+		);
+		assert_eq!(
+			rewrap_all("> > [!tip] \n> > alpha beta gamma", 14, DocumentSyntax::Markdown),
+			"> > [!tip] \n> > alpha beta\n> > gamma"
+		);
+		// Outside of a quote, and unknown kinds, it is ordinary text.
+		assert_eq!(
+			rewrap_all("[!NOTE]\nalpha\n\n> [!OTHER]\n> beta", 80, DocumentSyntax::Markdown),
+			"[!NOTE] alpha\n\n> [!OTHER] beta"
+		);
+		// Code comments are no Markdown documents.
+		assert_eq!(
+			rewrap_all("// > [!NOTE]\n// > alpha", 80, DocumentSyntax::Code),
+			"// > [!NOTE] alpha"
 		);
 	}
 

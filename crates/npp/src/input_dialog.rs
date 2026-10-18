@@ -89,6 +89,8 @@ struct DialogSession<'a> {
 thread_local! {
 	/// Session of the open dialog. `DialogBoxIndirectParamW` is modal, so there is at most one per
 	/// thread, and a thread local spares the pointer-width specific `SetWindowLongPtrW`.
+	// Clippy 1.99 reports the initializer although it is `const` already.
+	#[allow(clippy::missing_const_for_thread_local)]
 	static ACTIVE_SESSION: Cell<*mut DialogSession<'static>> = const { Cell::new(core::ptr::null_mut()) };
 }
 

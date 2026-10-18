@@ -1,5 +1,6 @@
 # The GNU toolchain (MinGW-w64) is the supported toolchain on every host. The linker names below
-# exist in Linux/macOS MinGW-w64 packages, MSYS2 (mingw64/mingw32) and llvm-mingw.
+# exist in Linux/macOS MinGW-w64 packages, MSYS2 (mingw64/mingw32) and llvm-mingw. Without them,
+# `cargo build-x64`/`build-x86` (`cargo xtask build`) fall back to a multilib `gcc -m64`/`-m32`.
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 # Link the C runtime and libgcc statically so the plugin DLL needs no MinGW runtime DLLs.
@@ -11,5 +12,5 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [alias]
 xtask = "run --quiet --package xtask --"
-build-x64 = "build --release --package npp-toolbox --target x86_64-pc-windows-gnu"
-build-x86 = "build --release --package npp-toolbox --target i686-pc-windows-gnu"
+build-x64 = "run --quiet --package xtask -- build x64"
+build-x86 = "run --quiet --package xtask -- build x86"

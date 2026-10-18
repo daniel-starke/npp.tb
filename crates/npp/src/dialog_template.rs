@@ -76,13 +76,15 @@ impl DialogTemplate {
 	pub fn into_dword_buffer(mut self) -> Vec<u32> {
 		self.align_to_dword();
 		self.words
-			.chunks_exact(2)
-			.map(|pair| u32::from(pair[0]) | (u32::from(pair[1]) << 16))
+			.as_chunks::<2>()
+			.0
+			.iter()
+			.map(|&[low, high]| u32::from(low) | (u32::from(high) << 16))
 			.collect()
 	}
 
 	fn align_to_dword(&mut self) {
-		if self.words.len() % 2 != 0 {
+		if !self.words.len().is_multiple_of(2) {
 			self.words.push(0);
 		}
 	}

@@ -5,7 +5,10 @@
 //! change that renames or removes something breaks the build here. Struct layouts are written by
 //! hand and must match the declarations listed at the end of `interface.rs`.
 
-use crate::interface::{menu_cmd_id, notepad_plus_msgs as npp, plugin_interface, scintilla as sci};
+use crate::interface::{
+	docking as dock, docking_resource, menu_cmd_id, notepad_plus_msgs as npp, plugin_interface,
+	scintilla as sci,
+};
 
 /// Notepad++ messages (`NPPM_*`) sent to the main Notepad++ window.
 pub mod npp_message {
@@ -45,6 +48,19 @@ pub mod npp_message {
 	/// `lParam`: NUL terminated UTF-16 Lexilla lexer name. Returns an `ILexer5*` for
 	/// `SCI_SETILEXER`, or null.
 	pub const CREATE_LEXER: u32 = npp::NPPM_CREATELEXER;
+	/// `lParam`: `*mut DockedWidgetData`, copied by Notepad++. Registers a dockable panel.
+	pub const DOCKING_REGISTER: u32 = npp::NPPM_DMMREGASDCKDLG;
+	/// `lParam`: client window of a registered panel.
+	pub const DOCKING_SHOW: u32 = npp::NPPM_DMMSHOW;
+	/// `lParam`: client window of a registered panel.
+	pub const DOCKING_HIDE: u32 = npp::NPPM_DMMHIDE;
+	/// `wParam`: [`super::modeless_dialog`] action, `lParam`: window. Registered windows get
+	/// their keyboard input through `IsDialogMessage` before Notepad++'s accelerators.
+	pub const MODELESS_DIALOG: u32 = npp::NPPM_MODELESSDIALOG;
+	/// `wParam`: size of [`super::DarkModeColors`], `lParam`: `*mut DarkModeColors`.
+	pub const GET_DARK_MODE_COLORS: u32 = npp::NPPM_GETDARKMODECOLORS;
+	/// `wParam`: command ID, `lParam`: checked (1) or not (0).
+	pub const SET_MENU_ITEM_CHECK: u32 = npp::NPPM_SETMENUITEMCHECK;
 }
 
 /// Menu command IDs for [`npp_message::MENU_COMMAND`].
@@ -61,10 +77,18 @@ pub mod language {
 	pub const HTML: isize = lang_type::L_HTML as isize;
 }
 
+/// Actions of [`npp_message::MODELESS_DIALOG`].
+pub mod modeless_dialog {
+	pub const ADD: usize = super::npp::MODELESSDIALOGADD as usize;
+	pub const REMOVE: usize = super::npp::MODELESSDIALOGREMOVE as usize;
+}
+
 /// Flags for [`npp_message::DARK_MODE_SUBCLASS_AND_THEME`].
 pub mod dark_mode_flags {
 	/// Standard flags for a dialog after its children are initialized.
 	pub const INIT: usize = super::npp::dmfInit as usize;
+	/// Standard flags after Notepad++ switched between dark and light mode.
+	pub const HANDLE_CHANGE: usize = super::npp::dmfHandleChange as usize;
 }
 
 /// Values returned by [`npp_message::GET_TOOLBAR_ICON_SET_CHOICE`]. The header documents them
@@ -84,6 +108,28 @@ pub mod npp_notification {
 	pub const READY: u32 = npp::NPPN_READY;
 	pub const TOOLBAR_MODIFICATION: u32 = npp::NPPN_TBMODIFICATION;
 	pub const SHUTDOWN: u32 = npp::NPPN_SHUTDOWN;
+	/// Another document became the active one, also when switching views.
+	pub const BUFFER_ACTIVATED: u32 = npp::NPPN_BUFFERACTIVATED;
+	pub const DARK_MODE_CHANGED: u32 = npp::NPPN_DARKMODECHANGED;
+}
+
+/// Scintilla notification codes (`SCN_*`) passed to `beNotified` with the editor as sender.
+pub mod scintilla_notification {
+	use super::sci;
+
+	/// [`super::SciNotification::modification_type`] tells what changed.
+	pub const MODIFIED: u32 = sci::SCN_MODIFIED;
+	/// [`super::SciNotification::updated`] tells what changed.
+	pub const UPDATE_UI: u32 = sci::SCN_UPDATEUI;
+}
+
+/// Flags of [`super::SciNotification::modification_type`] and [`super::SciNotification::updated`].
+pub mod scintilla_change {
+	use super::sci;
+
+	pub const INSERT_TEXT: i32 = sci::SC_MOD_INSERTTEXT as i32;
+	pub const DELETE_TEXT: i32 = sci::SC_MOD_DELETETEXT as i32;
+	pub const SELECTION_UPDATED: i32 = sci::SC_UPDATE_SELECTION as i32;
 }
 
 /// Scintilla messages (`SCI_*`) sent to an editor window.
@@ -142,6 +188,20 @@ pub mod scintilla_constant {
 	pub const EOL_LF: isize = sci::SC_EOL_LF as isize;
 }
 
+/// Docking panel constants (`Docking.h`, `dockingResource.h`).
+pub mod docking {
+	use super::{dock, docking_resource};
+
+	/// [`super::DockedWidgetData::mask`]: docked on the right side by default.
+	pub const DEFAULT_RIGHT: u32 = dock::DWS_DF_CONT_RIGHT;
+	/// [`super::DockedWidgetData::mask`]: `icon_tab` is set.
+	pub const HAS_TAB_ICON: u32 = dock::DWS_ICONTAB;
+	/// [`super::DockedWidgetData::mask`]: the plugin applies the dark mode itself.
+	pub const USES_OWN_DARK_MODE: u32 = dock::DWS_USEOWNDARKMODE;
+	/// `NMHDR::code` of the `WM_NOTIFY` sent to the client window when the user closes the panel.
+	pub const CLOSED: u32 = docking_resource::DMN_CLOSE;
+}
+
 /// Maximum menu item name length including the terminating NUL (`menuItemSize`).
 pub const MENU_ITEM_NAME_CAPACITY: usize = plugin_interface::menuItemSize as usize;
 
@@ -151,7 +211,7 @@ pub use self::windows_types::*;
 #[cfg(windows)]
 mod windows_types {
 	use core::ffi::c_char;
-	use windows_sys::Win32::Foundation::HWND;
+	use windows_sys::Win32::Foundation::{HWND, RECT};
 	use windows_sys::Win32::Graphics::Gdi::HBITMAP;
 	use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
 
@@ -196,14 +256,85 @@ mod windows_types {
 		pub toolbar_icon_dark_mode: HICON,
 	}
 
-	/// `NMHDR`, the first member of `SCNotification`. Only the header is declared because the
-	/// framework never reads past it. The full structure is larger.
+	/// `NMHDR`, the first member of `SCNotification`.
 	#[repr(C)]
 	#[derive(Clone, Copy, Debug)]
 	pub struct NotificationHeader {
 		pub hwnd_from: HWND,
 		pub id_from: usize,
 		pub code: u32,
+	}
+
+	/// `SCNotification`. Notepad++ passes this full structure for its own (`NPPN_*`)
+	/// notifications as well, so reading all fields is always valid.
+	#[repr(C)]
+	#[derive(Clone, Copy, Debug)]
+	pub struct SciNotification {
+		pub header: NotificationHeader,
+		pub position: isize,
+		pub ch: i32,
+		pub modifiers: i32,
+		/// `SC_MOD_*` flags of `SCN_MODIFIED`.
+		pub modification_type: i32,
+		pub text: *const c_char,
+		pub length: isize,
+		pub lines_added: isize,
+		pub message: i32,
+		pub wparam: usize,
+		pub lparam: isize,
+		pub line: isize,
+		pub fold_level_now: i32,
+		pub fold_level_previous: i32,
+		pub margin: i32,
+		pub list_type: i32,
+		pub x: i32,
+		pub y: i32,
+		pub token: i32,
+		pub annotation_lines_added: isize,
+		/// `SC_UPDATE_*` flags of `SCN_UPDATEUI`.
+		pub updated: i32,
+		pub list_completion_method: i32,
+		pub character_source: i32,
+	}
+
+	/// `NppDarkMode::Colors` of [`super::npp_message::GET_DARK_MODE_COLORS`]. Only documented in a
+	/// comment of `Notepad_plus_msgs.h`, so it cannot be snapshotted.
+	#[repr(C)]
+	#[derive(Clone, Copy, Debug, Default)]
+	pub struct DarkModeColors {
+		pub background: u32,
+		pub softer_background: u32,
+		pub hot_background: u32,
+		pub pure_background: u32,
+		pub error_background: u32,
+		pub text: u32,
+		pub darker_text: u32,
+		pub disabled_text: u32,
+		pub link_text: u32,
+		pub edge: u32,
+		pub hot_edge: u32,
+		pub disabled_edge: u32,
+	}
+
+	/// `DockedWidgetData` (`tTbData`) for [`super::npp_message::DOCKING_REGISTER`]. Notepad++
+	/// copies the structure but keeps the string pointers, so they must live as long as the DLL.
+	#[repr(C)]
+	pub struct DockedWidgetData {
+		pub client: HWND,
+		pub name: *const u16,
+		/// Index of the menu entry that shows the panel. Notepad++ runs it on startup to restore a
+		/// panel that was open on exit.
+		pub dialog_id: i32,
+		/// [`super::docking`] flags.
+		pub mask: u32,
+		pub icon_tab: HICON,
+		pub additional_info: *const u16,
+		/// Internal to Notepad++.
+		pub float_rectangle: RECT,
+		/// Internal to Notepad++.
+		pub previous_container: i32,
+		/// The plugin's DLL file name, e.g. `NppToolBox.dll`.
+		pub module_name: *const u16,
 	}
 
 	/// `Sci_TextRangeFull`; `text` must hold `max - min + 1` bytes.

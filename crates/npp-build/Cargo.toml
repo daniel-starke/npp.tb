@@ -1,6 +1,6 @@
 [package]
 name = "npp-build"
-description = "Build script helpers for Notepad++ plugins using the npp crate (SVG toolbar icon rendering)."
+description = "Build script helpers for Notepad++ plugins using the npp crate (SVG toolbar icon style check)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

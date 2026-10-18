@@ -11,70 +11,97 @@ pub struct ImageEmbedding<'a> {
 	pub max_image_bytes: u64,
 }
 
+/// The content of a local image file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EmbeddedImage {
+	pub media_type: &'static str,
+	pub bytes: Vec<u8>,
+}
+
+impl EmbeddedImage {
+	pub fn data_uri(&self) -> String {
+		let mut uri = String::with_capacity(
+			"data:;base64,".len()
+				+ self.media_type.len()
+				+ base64::encoded_length(self.bytes.len()),
+		);
+		uri.push_str("data:");
+		uri.push_str(self.media_type);
+		uri.push_str(";base64,");
+		base64::encode_into(&self.bytes, &mut uri);
+		uri
+	}
+}
+
 impl ImageEmbedding<'_> {
 	/// The `data:` URI for `source`, or `None` if it is not a readable local image within the
 	/// size limit. Then the caller keeps `source` as written.
 	pub fn data_uri(&self, source: &str) -> Option<String> {
+		self.load(source).map(|image| image.data_uri())
+	}
+
+	/// The local image `source` refers to, or `None` if it is not a readable local image within
+	/// the size limit.
+	pub fn load(&self, source: &str) -> Option<EmbeddedImage> {
 		let path = self.local_path(source)?;
 		let media_type = media_type_of(&path)?;
 		if std::fs::metadata(&path).ok()?.len() > self.max_image_bytes {
 			return None;
 		}
 		let bytes = std::fs::read(&path).ok()?;
-		let mut uri = String::with_capacity(
-			"data:;base64,".len() + media_type.len() + base64::encoded_length(bytes.len()),
-		);
-		uri.push_str("data:");
-		uri.push_str(media_type);
-		uri.push_str(";base64,");
-		base64::encode_into(&bytes, &mut uri);
-		Some(uri)
+		Some(EmbeddedImage { media_type, bytes })
 	}
 
 	fn local_path(&self, source: &str) -> Option<PathBuf> {
-		let source = source.trim();
-		// The query and fragment are not part of the file name.
-		let source = &source[..source.find(['?', '#']).unwrap_or(source.len())];
-		if source.is_empty() || source.starts_with("//") {
-			return None;
-		}
-		let path = match uri_scheme(source) {
-			Some(scheme) if scheme.eq_ignore_ascii_case("file") => {
-				let path = &source[scheme.len() + 1..];
-				let path = match path.strip_prefix("//") {
-					Some(authority_and_path) => {
-						let authority_end =
-							authority_and_path.find('/').unwrap_or(authority_and_path.len());
-						let authority = &authority_and_path[..authority_end];
-						// Only local files. A host name would be a network resource.
-						if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
-							return None;
-						}
-						&authority_and_path[authority_end..]
+		local_file_path(source, self.base_directory)
+	}
+}
+
+/// The local file a link or image `source` names, relative ones resolved against `base_directory`.
+/// `None` for other schemes, network locations and relative paths without a base directory.
+pub fn local_file_path(source: &str, base_directory: Option<&Path>) -> Option<PathBuf> {
+	let source = source.trim();
+	// The query and fragment are not part of the file name.
+	let source = &source[..source.find(['?', '#']).unwrap_or(source.len())];
+	if source.is_empty() || source.starts_with("//") {
+		return None;
+	}
+	let path = match uri_scheme(source) {
+		Some(scheme) if scheme.eq_ignore_ascii_case("file") => {
+			let path = &source[scheme.len() + 1..];
+			let path = match path.strip_prefix("//") {
+				Some(authority_and_path) => {
+					let authority_end =
+						authority_and_path.find('/').unwrap_or(authority_and_path.len());
+					let authority = &authority_and_path[..authority_end];
+					// Only local files. A host name would be a network resource.
+					if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+						return None;
 					}
-					None => path,
-				};
-				// `/C:/dir/file.png` names `C:/dir/file.png`.
-				let path = match path.as_bytes() {
-					[b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &path[1..],
-					_ => path,
-				};
-				PathBuf::from(percent_decode(path)?)
-			}
-			// A Windows drive letter looks like a one letter scheme.
-			Some(scheme) if scheme.len() > 1 => return None,
-			_ => PathBuf::from(percent_decode(source)?),
-		};
-		if path.is_absolute() || is_windows_absolute(&path) {
-			Some(path)
-		} else {
-			Some(self.base_directory?.join(path))
+					&authority_and_path[authority_end..]
+				}
+				None => path,
+			};
+			// `/C:/dir/file.png` names `C:/dir/file.png`.
+			let path = match path.as_bytes() {
+				[b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &path[1..],
+				_ => path,
+			};
+			PathBuf::from(percent_decode(path)?)
 		}
+		// A Windows drive letter looks like a one letter scheme.
+		Some(scheme) if scheme.len() > 1 => return None,
+		_ => PathBuf::from(percent_decode(source)?),
+	};
+	if path.is_absolute() || is_windows_absolute(&path) {
+		Some(path)
+	} else {
+		Some(base_directory?.join(path))
 	}
 }
 
 /// The scheme of an absolute URI (`https`, `data`, `file`, ...), if `reference` has one.
-fn uri_scheme(reference: &str) -> Option<&str> {
+pub fn uri_scheme(reference: &str) -> Option<&str> {
 	let colon = reference.find(':')?;
 	let scheme = &reference[..colon];
 	let mut characters = scheme.chars();
@@ -166,7 +193,9 @@ mod tests {
 		assert_eq!(embedding.data_uri("./my%20images/dot.png?raw=true#top"), expected);
 		let absolute = directory.0.join("my images/dot.png");
 		assert_eq!(embedding.data_uri(absolute.to_str().expect("UTF-8 path")), expected);
-		let file_uri = format!("file://{}", absolute.to_str().expect("UTF-8 path"));
+		// `file:///C:/dir/...` on Windows, `file:///tmp/...` elsewhere.
+		let path = absolute.to_str().expect("UTF-8 path").replace('\\', "/");
+		let file_uri = format!("file:///{}", path.trim_start_matches('/'));
 		assert_eq!(embedding.data_uri(&file_uri.replace(' ', "%20")), expected);
 	}
 

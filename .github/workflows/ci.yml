@@ -45,7 +45,7 @@ jobs:
         run: |
           imports=$(x86_64-w64-mingw32-objdump -p target/${{ matrix.target }}/release/NppToolBox.dll | sed -n 's/^\s*DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
           echo "$imports"
-          unexpected=$(echo "$imports" | grep -vE '^(kernel32|user32|gdi32|ntdll|msvcrt|bcryptprimitives|api-ms-win-[a-z0-9-]+)\.dll$' || true)
+          unexpected=$(echo "$imports" | grep -vE '^(kernel32|user32|gdi32|ntdll|msvcrt|advapi32|ole32|oleaut32|shell32|dwmapi|bcryptprimitives|api-ms-win-[a-z0-9-]+)\.dll$' || true)
           test -z "$unexpected" || { echo "Unexpected runtime dependencies: $unexpected"; exit 1; }
       - name: Package
         run: |

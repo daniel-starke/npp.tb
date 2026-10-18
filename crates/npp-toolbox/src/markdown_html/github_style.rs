@@ -12,6 +12,14 @@ pub const STYLE_SHEET: &str = concat!(
 	"@media (max-width:767px){.markdown-body{padding:15px}}",
 );
 
+/// `github-markdown-light.css` without the page layout, for the viewer.
+pub const LIGHT_STYLE_SHEET: &str =
+	include_str!(concat!(env!("OUT_DIR"), "/github-markdown-light.min.css"));
+
+/// `github-markdown-dark.css`, for the viewer in Notepad++'s dark mode.
+pub const DARK_STYLE_SHEET: &str =
+	include_str!(concat!(env!("OUT_DIR"), "/github-markdown-dark.min.css"));
+
 /// The kinds of code tokens with a GitHub color ("pretty lights" classes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
@@ -110,6 +118,26 @@ impl AlertKind {
 			AlertKind::Caution => "#d1242f",
 			_ => self.border_color(),
 		}
+	}
+
+	/// The title color of `github-markdown-dark.css`.
+	pub fn dark_title_color(self) -> &'static str {
+		match self {
+			AlertKind::Note => "#4493f8",
+			AlertKind::Tip => "#3fb950",
+			AlertKind::Important => "#ab7df8",
+			AlertKind::Warning => "#d29922",
+			AlertKind::Caution => "#f85149",
+		}
+	}
+
+	/// The title icon as a standalone SVG document filled with `color`. Images cannot take the
+	/// text color, and Office applications and LibreOffice drop inline `<svg>` elements.
+	pub fn icon_svg(self, color: &str) -> String {
+		format!(
+			"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" width=\"16\" height=\"16\"><path fill=\"{color}\" d=\"{}\"/></svg>",
+			self.icon_path()
+		)
 	}
 
 	/// Path of the 16 px Octicon GitHub shows in the title (Primer Octicons, MIT License,

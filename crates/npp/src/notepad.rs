@@ -12,7 +12,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::ffi::{
-	NppData, ToolbarIconsWithDarkMode, dark_mode_flags, menu_command, npp_message, toolbar_icon_set,
+	DarkModeColors, DockedWidgetData, NppData, ToolbarIconsWithDarkMode, dark_mode_flags,
+	menu_command, modeless_dialog, npp_message, toolbar_icon_set,
 };
 use crate::scintilla::Scintilla;
 use crate::wide::{from_wide_until_null, to_wide_null_terminated};
@@ -63,6 +64,13 @@ impl Notepad {
 			1 => self.handles.scintilla_second_handle,
 			_ => self.handles.scintilla_main_handle,
 		})
+	}
+
+	/// Whether `window` is one of the two editors of the main window, e.g. the sender of a
+	/// Scintilla notification.
+	pub fn is_editor_window(&self, window: HWND) -> bool {
+		window == self.handles.scintilla_main_handle
+			|| window == self.handles.scintilla_second_handle
 	}
 
 	pub fn plugins_config_directory(&self) -> Option<PathBuf> {
@@ -181,6 +189,16 @@ impl Notepad {
 		);
 	}
 
+	/// Applies a changed dark or light mode to a window themed with
+	/// [`Self::apply_theme_to_dialog`] before.
+	pub fn update_dialog_theme(&self, dialog: HWND) {
+		self.send_message(
+			npp_message::DARK_MODE_SUBCLASS_AND_THEME,
+			dark_mode_flags::HANDLE_CHANGE,
+			dialog as LPARAM,
+		);
+	}
+
 	/// Notepad++ keeps using the handles. They must stay alive until it exits.
 	pub fn add_toolbar_icon(&self, command_id: i32, icons: &ToolbarIconsWithDarkMode) {
 		self.send_message(
@@ -188,6 +206,54 @@ impl Notepad {
 			command_id as WPARAM,
 			icons as *const ToolbarIconsWithDarkMode as LPARAM,
 		);
+	}
+
+	/// Checks the plugin menu item and toolbar button of `command_id`.
+	pub fn set_menu_item_checked(&self, command_id: i32, is_checked: bool) {
+		self.send_message(
+			npp_message::SET_MENU_ITEM_CHECK,
+			command_id as WPARAM,
+			LPARAM::from(is_checked),
+		);
+	}
+
+	/// Registers `panel.client` as dockable panel. Notepad++ copies `panel` but keeps its string
+	/// pointers, so they must live as long as the DLL.
+	pub fn register_docking_panel(&self, panel: &DockedWidgetData) {
+		self.send_message(
+			npp_message::DOCKING_REGISTER,
+			0,
+			panel as *const DockedWidgetData as LPARAM,
+		);
+	}
+
+	/// Lets `window` and its children get their keys (Tab, Ctrl+C, ...) before Notepad++'s
+	/// accelerators. Unregister it before it is destroyed.
+	pub fn register_modeless_window(&self, window: HWND, is_registered: bool) {
+		let action = match is_registered {
+			true => modeless_dialog::ADD,
+			false => modeless_dialog::REMOVE,
+		};
+		self.send_message(npp_message::MODELESS_DIALOG, action, window as LPARAM);
+	}
+
+	/// The colors of the dark mode, also when it is not enabled.
+	pub fn dark_mode_colors(&self) -> Option<DarkModeColors> {
+		let mut colors = DarkModeColors::default();
+		let succeeded = self.send_message(
+			npp_message::GET_DARK_MODE_COLORS,
+			size_of::<DarkModeColors>(),
+			&raw mut colors as LPARAM,
+		) != 0;
+		succeeded.then_some(colors)
+	}
+
+	pub fn show_docking_panel(&self, client: HWND) {
+		self.send_message(npp_message::DOCKING_SHOW, 0, client as LPARAM);
+	}
+
+	pub fn hide_docking_panel(&self, client: HWND) {
+		self.send_message(npp_message::DOCKING_HIDE, 0, client as LPARAM);
 	}
 
 	pub fn show_message(&self, title: &str, text: &str, kind: MessageKind) {

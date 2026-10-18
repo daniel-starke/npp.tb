@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const STYLE_SHEET: &str = "assets/github-markdown-light.css";
+const STYLE_SHEETS: [&str; 2] = ["github-markdown-light", "github-markdown-dark"];
 const RESOURCE_SCRIPT: &str = "NppToolBox.rc";
 
 fn main() {
@@ -15,13 +15,16 @@ fn main() {
 		std::process::exit(1);
 	}
 
-	println!("cargo:rerun-if-changed={STYLE_SHEET}");
-	let style_sheet = std::fs::read_to_string(STYLE_SHEET).expect("readable style sheet");
-	std::fs::write(
-		output_directory.join("github-markdown-light.min.css"),
-		npp_build::minify_css(&style_sheet),
-	)
-	.expect("writable OUT_DIR");
+	for name in STYLE_SHEETS {
+		let path = format!("assets/{name}.css");
+		println!("cargo:rerun-if-changed={path}");
+		let style_sheet = std::fs::read_to_string(&path).expect("readable style sheet");
+		std::fs::write(
+			output_directory.join(format!("{name}.min.css")),
+			npp_build::minify_css(&style_sheet),
+		)
+		.expect("writable OUT_DIR");
+	}
 
 	if let Err(error) =
 		npp_build::link_resource_script(Path::new(RESOURCE_SCRIPT), &output_directory)

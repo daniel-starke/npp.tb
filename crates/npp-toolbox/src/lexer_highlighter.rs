@@ -20,16 +20,16 @@ static HIDDEN_EDITOR: AtomicIsize = AtomicIsize::new(0);
 /// keyword set index.
 const HTML_KEYWORD_SOURCES: [(usize, &str); 3] = [(0, "html"), (1, "javascript"), (4, "php")];
 
-pub struct LexerHighlighter<'a> {
-	notepad: &'a Notepad,
+pub struct LexerHighlighter {
+	notepad: Notepad,
 	/// Read on the first code block that needs them.
 	langs_xml: Option<String>,
 	stylers_xml: Option<String>,
 }
 
-impl<'a> LexerHighlighter<'a> {
-	pub fn new(notepad: &'a Notepad) -> Self {
-		Self { notepad, langs_xml: None, stylers_xml: None }
+impl LexerHighlighter {
+	pub fn new(notepad: &Notepad) -> Self {
+		Self { notepad: *notepad, langs_xml: None, stylers_xml: None }
 	}
 
 	pub fn highlight(&mut self, info_language: &str, code: &str) -> Vec<HighlightedSpan> {
@@ -118,12 +118,12 @@ impl<'a> LexerHighlighter<'a> {
 
 	fn langs_xml(&mut self) -> &str {
 		let notepad = self.notepad;
-		self.langs_xml.get_or_insert_with(|| read_configuration(notepad, "langs"))
+		self.langs_xml.get_or_insert_with(|| read_configuration(&notepad, "langs"))
 	}
 
 	fn stylers_xml(&mut self) -> &str {
 		let notepad = self.notepad;
-		self.stylers_xml.get_or_insert_with(|| read_configuration(notepad, "stylers"))
+		self.stylers_xml.get_or_insert_with(|| read_configuration(&notepad, "stylers"))
 	}
 }
 

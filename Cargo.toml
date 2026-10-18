@@ -3,9 +3,9 @@ resolver = "3"
 members = ["crates/npp", "crates/npp-build", "crates/npp-toolbox", "crates/xtask"]
 
 [workspace.package]
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 authors = ["Daniel Starke"]
 repository = "https://github.com/daniel-starke/npp.tb"
 license = "MIT"
@@ -14,6 +14,7 @@ license = "MIT"
 npp = { path = "crates/npp" }
 npp-build = { path = "crates/npp-build" }
 windows-sys = { version = "0.61" }
+windows-core = { version = "0.100", default-features = false, features = ["proc-macros"] }
 unicode-width = { version = "0.2", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false }
 resvg = { version = "0.48", default-features = false }

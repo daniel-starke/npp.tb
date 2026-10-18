@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use crate::ffi::{
 	FuncItem, MENU_ITEM_NAME_CAPACITY, NotificationHeader, NppData, PluginCommandFunction,
-	ShortcutKey, npp_notification,
+	SciNotification, ShortcutKey, npp_notification,
 };
 use crate::icon::ToolbarIcon;
 use crate::notepad::Notepad;
@@ -25,6 +25,10 @@ pub struct PluginDefinition {
 	/// Shown as plugin menu title. Notepad++ requires the DLL to be named `<name>.dll`.
 	pub name: &'static str,
 	pub menu: &'static [MenuEntry],
+	/// Called with every Notepad++ (`NPPN_*`) and Scintilla (`SCN_*`) notification.
+	pub on_notification: fn(&Notepad, &SciNotification),
+	/// Whether the toolbar icon of a command is added, e.g. depending on a user setting.
+	pub shows_toolbar_icon: fn(&Notepad, &Command) -> bool,
 }
 
 pub enum MenuEntry {
@@ -94,6 +98,59 @@ const MENU_ENTRY_TRAMPOLINES: [PluginCommandFunction; MAX_MENU_ENTRIES] = menu_e
 	0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
 );
 
+/// The menu index of the command running `run`, e.g. for [`crate::ffi::DockedWidgetData`].
+pub fn menu_index_of(run: fn(&Notepad)) -> Option<usize> {
+	let state = PLUGIN_STATE.get()?;
+	state.definition.menu.iter().position(
+		|entry| matches!(entry, MenuEntry::Command(command) if core::ptr::fn_addr_eq(command.run, run)),
+	)
+}
+
+/// The command ID Notepad++ assigned to the command running `run`, e.g. to check its menu item.
+pub fn command_id_of(run: fn(&Notepad)) -> Option<i32> {
+	let index = menu_index_of(run)?;
+	let items = MENU_ITEMS.get()?;
+	// SAFETY: The leaked array has `items.1` entries and is only accessed on the UI thread.
+	(index < items.1).then(|| unsafe { (*items.0.add(index)).command_id })
+}
+
+/// The handle of the plugin DLL, e.g. for registering window classes.
+pub fn module_handle() -> windows_sys::Win32::Foundation::HMODULE {
+	use windows_sys::Win32::System::LibraryLoader::{
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		GetModuleHandleExW,
+	};
+
+	let mut module = core::ptr::null_mut();
+	let address_in_module = module_handle as *const u16;
+	// SAFETY: The address lies in this DLL. The handle is not reference counted, so it needs no
+	// release.
+	unsafe {
+		GetModuleHandleExW(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			address_in_module,
+			&mut module,
+		)
+	};
+	module
+}
+
+/// The directory of the plugin DLL, e.g. `<Notepad++>\plugins\<Name>`.
+pub fn module_directory() -> Option<std::path::PathBuf> {
+	use std::os::windows::ffi::OsStringExt;
+	use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+
+	let module = module_handle();
+	if module.is_null() {
+		return None;
+	}
+	let mut buffer = vec![0u16; 32 * 1024];
+	// SAFETY: The buffer length is passed.
+	let length = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) };
+	let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+	path.parent().map(std::path::Path::to_path_buf)
+}
+
 /// Implementation of the exported functions. Only meant to be called by `export_plugin!`.
 #[doc(hidden)]
 pub mod exports {
@@ -137,14 +194,19 @@ pub mod exports {
 	/// `notification` must be null or point to a valid `SCNotification`.
 	pub unsafe fn notify(notification: *const NotificationHeader) {
 		let Some(state) = PLUGIN_STATE.get() else { return };
-		// SAFETY: Guaranteed by the caller.
-		let Some(header) = (unsafe { notification.as_ref() }) else { return };
-		if header.hwnd_from != state.notepad.window() {
+		// SAFETY: Guaranteed by the caller. Notepad++ sends a full `SCNotification` also for its
+		// own notifications.
+		let Some(notification) = (unsafe { notification.cast::<SciNotification>().as_ref() })
+		else {
 			return;
-		}
-		if header.code == npp_notification::TOOLBAR_MODIFICATION {
+		};
+		let header = &notification.header;
+		if header.hwnd_from == state.notepad.window()
+			&& header.code == npp_notification::TOOLBAR_MODIFICATION
+		{
 			register_toolbar_icons(state);
 		}
+		(state.definition.on_notification)(&state.notepad, notification);
 	}
 
 	fn to_func_item(index: usize, entry: &MenuEntry) -> FuncItem {
@@ -177,9 +239,13 @@ pub mod exports {
 			SMALL_TOOLBAR_ICON_SIZE
 		});
 		for (index, entry) in state.definition.menu.iter().enumerate().take(items.1) {
-			let MenuEntry::Command(Command { toolbar_icon: Some(icon), .. }) = entry else {
+			let MenuEntry::Command(command @ Command { toolbar_icon: Some(icon), .. }) = entry
+			else {
 				continue;
 			};
+			if !(state.definition.shows_toolbar_icon)(notepad, command) {
+				continue;
+			}
 			// SAFETY: `index < items.1`. Notepad++ has filled in the command IDs by now.
 			let command_id = unsafe { (*items.0.add(index)).command_id };
 			if let Some(handles) = create_toolbar_icon_handles(icon, bitmap_size, icon_size) {

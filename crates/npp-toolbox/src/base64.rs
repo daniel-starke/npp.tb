@@ -10,14 +10,13 @@ pub fn encoded_length(byte_count: usize) -> usize {
 pub fn encode_into(bytes: &[u8], output: &mut String) {
 	output.reserve(encoded_length(bytes.len()));
 	let sextet = |group: u32, index: u32| ALPHABET[(group >> (18 - 6 * index) & 0x3F) as usize];
-	let mut chunks = bytes.chunks_exact(3);
-	for chunk in &mut chunks {
-		let group = u32::from(chunk[0]) << 16 | u32::from(chunk[1]) << 8 | u32::from(chunk[2]);
+	let (chunks, rest) = bytes.as_chunks::<3>();
+	for &[first, second, third] in chunks {
+		let group = u32::from(first) << 16 | u32::from(second) << 8 | u32::from(third);
 		for index in 0..4 {
 			output.push(char::from(sextet(group, index)));
 		}
 	}
-	let rest = chunks.remainder();
 	if rest.is_empty() {
 		return;
 	}

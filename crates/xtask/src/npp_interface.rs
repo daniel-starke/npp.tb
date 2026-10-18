@@ -26,11 +26,16 @@ struct InterfaceHeader {
 }
 
 /// In dependency order: later headers may refer to constants of earlier ones.
-const INTERFACE_HEADERS: [InterfaceHeader; 4] = [
+const INTERFACE_HEADERS: [InterfaceHeader; 6] = [
 	InterfaceHeader {
 		repository_path: "scintilla/include/Scintilla.h",
 		module_name: "scintilla",
-		mirrored_structs: &["Sci_CharacterRangeFull", "Sci_TextRangeFull", "Sci_NotifyHeader"],
+		mirrored_structs: &[
+			"Sci_CharacterRangeFull",
+			"Sci_TextRangeFull",
+			"Sci_NotifyHeader",
+			"SCNotification",
+		],
 	},
 	InterfaceHeader {
 		repository_path: "PowerEditor/src/menuCmdID.h",
@@ -46,6 +51,16 @@ const INTERFACE_HEADERS: [InterfaceHeader; 4] = [
 		repository_path: "PowerEditor/src/MISC/PluginsManager/PluginInterface.h",
 		module_name: "plugin_interface",
 		mirrored_structs: &["NppData", "ShortcutKey", "FuncItem"],
+	},
+	InterfaceHeader {
+		repository_path: "PowerEditor/src/WinControls/DockingWnd/dockingResource.h",
+		module_name: "docking_resource",
+		mirrored_structs: &[],
+	},
+	InterfaceHeader {
+		repository_path: "PowerEditor/src/WinControls/DockingWnd/Docking.h",
+		module_name: "docking",
+		mirrored_structs: &["DockedWidgetData"],
 	},
 ];
 

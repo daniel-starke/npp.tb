@@ -5,24 +5,27 @@
 //! heading anchors, emoji shortcodes, math (as MathML, so no JavaScript is needed), front matter
 //! tables and highlighted code blocks.
 
-mod autolink;
+pub(crate) mod autolink;
 mod escape;
 mod github_style;
-mod heading_anchor;
+pub(crate) mod heading_anchor;
 mod math;
 mod math_symbols;
-mod raw_html;
+pub(crate) mod raw_html;
 
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
 
 use crate::emoji::{TextPart, for_each_part};
+use crate::image_embedding::EmbeddedImage;
 use escape::{is_safe_url, push_escaped_attribute, push_escaped_text};
-use github_style::{AlertKind, inline};
+use github_style::inline;
 use heading_anchor::HeadingAnchors;
 
-pub use github_style::TokenKind;
+pub(crate) use github_style::AlertKind;
+
+pub use github_style::{DARK_STYLE_SHEET, LIGHT_STYLE_SHEET, TokenKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Styling {
@@ -54,13 +57,27 @@ pub struct RenderOptions<'a> {
 	/// Colored tokens of a code block, given its language (the first word of the info string)
 	/// and its code. The spans must be ordered and must not overlap.
 	pub highlight_code: &'a mut dyn FnMut(&str, &str) -> Vec<HighlightedSpan>,
+	/// Adds `data-line` attributes with the zero based source line to the block elements, so that a
+	/// preview can scroll to the block at the editor caret.
+	pub annotates_source_lines: bool,
+	/// Colors images like the alert icons for `github-markdown-dark.css`. Inline styles are always
+	/// light.
+	pub is_dark: bool,
 }
 
 /// The HTML for `markdown`, to be placed in [`html_page`] or [`inline_styled_fragment`].
 pub fn render_markdown(markdown: &str, options: &mut RenderOptions) -> String {
 	let markdown = markdown.replace("\r\n", "\n");
-	let events: Vec<Event> = Parser::new_ext(&markdown, parser_options()).collect();
-	let mut writer = HtmlWriter::new(&events, options);
+	let (events, event_offsets): (Vec<Event>, Vec<usize>) =
+		Parser::new_ext(&markdown, parser_options())
+			.into_offset_iter()
+			.map(|(event, range)| (event, range.start))
+			.unzip();
+	let event_lines = match options.annotates_source_lines {
+		true => source_lines_of_offsets(&markdown, &event_offsets),
+		false => Vec::new(),
+	};
+	let mut writer = HtmlWriter::new(&events, &event_lines, options);
 	writer.write_all();
 	writer.output
 }
@@ -86,7 +103,7 @@ pub fn inline_styled_fragment(body: &str) -> String {
 	format!("<div style=\"{}\">\n{body}</div>\n", inline::BODY)
 }
 
-fn parser_options() -> Options {
+pub(crate) fn parser_options() -> Options {
 	Options::ENABLE_TABLES
 		| Options::ENABLE_FOOTNOTES
 		| Options::ENABLE_STRIKETHROUGH
@@ -98,6 +115,8 @@ fn parser_options() -> Options {
 
 struct HeadingState {
 	level: usize,
+	/// Index of the start event.
+	start_index: usize,
 	plain_text: String,
 }
 
@@ -110,6 +129,8 @@ struct ImageState {
 }
 
 struct CodeBlockState {
+	/// Index of the start event.
+	start_index: usize,
 	language: String,
 	code: String,
 }
@@ -132,6 +153,8 @@ struct FootnoteReference {
 
 struct HtmlWriter<'events, 'input, 'options, 'callbacks> {
 	events: &'events [Event<'input>],
+	/// Source line of each event, empty without [`RenderOptions::annotates_source_lines`].
+	event_lines: &'events [usize],
 	options: &'options mut RenderOptions<'callbacks>,
 	output: String,
 	/// Outputs put aside while a heading or footnote definition is written on its own.
@@ -157,10 +180,12 @@ struct HtmlWriter<'events, 'input, 'options, 'callbacks> {
 impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options, 'callbacks> {
 	fn new(
 		events: &'events [Event<'input>],
+		event_lines: &'events [usize],
 		options: &'options mut RenderOptions<'callbacks>,
 	) -> Self {
 		Self {
 			events,
+			event_lines,
 			options,
 			output: String::new(),
 			suspended_outputs: Vec::new(),
@@ -226,6 +251,19 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 	fn simple_tag(&mut self, tag: &str, inline_style: &str) {
 		self.start_tag(tag, "", inline_style);
 		self.output.push('>');
+	}
+
+	/// Writes `<tag ...>` of a block that starts at the event `index`.
+	fn block_tag(&mut self, index: usize, tag: &str, class: &str, inline_style: &str) {
+		self.start_tag(tag, class, inline_style);
+		self.push_source_line(index);
+		self.output.push('>');
+	}
+
+	fn push_source_line(&mut self, index: usize) {
+		if let Some(line) = self.event_lines.get(index) {
+			self.push_attribute("data-line", &line.to_string());
+		}
 	}
 
 	fn push_attribute(&mut self, name: &str, value: &str) {
@@ -367,7 +405,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			Event::SoftBreak => self.output.push('\n'),
 			Event::HardBreak => self.output.push_str("<br>\n"),
 			Event::Rule => {
-				self.simple_tag("hr", inline::RULE);
+				self.block_tag(index, "hr", "", inline::RULE);
 				self.output.push('\n');
 			}
 			Event::TaskListMarker(checked) => self.task_list_marker(*checked),
@@ -390,24 +428,30 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			self.output.push('\n');
 		}
 		match tag {
-			Tag::Paragraph => self.simple_tag("p", inline::PARAGRAPH),
+			Tag::Paragraph => self.block_tag(index, "p", "", inline::PARAGRAPH),
 			Tag::Heading { level, .. } => {
-				self.heading =
-					Some(HeadingState { level: *level as usize, plain_text: String::new() });
+				self.heading = Some(HeadingState {
+					level: *level as usize,
+					start_index: index,
+					plain_text: String::new(),
+				});
 				self.suspend_output();
 			}
 			Tag::BlockQuote(None) => {
-				self.simple_tag("blockquote", inline::BLOCK_QUOTE);
+				self.block_tag(index, "blockquote", "", inline::BLOCK_QUOTE);
 				self.output.push('\n');
 			}
-			Tag::BlockQuote(Some(kind)) => self.start_alert(AlertKind::from(*kind)),
+			Tag::BlockQuote(Some(kind)) => self.start_alert(AlertKind::from(*kind), index),
 			Tag::CodeBlock(kind) => {
 				let language = match kind {
 					CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
 					CodeBlockKind::Indented => "",
 				};
-				self.code_block =
-					Some(CodeBlockState { language: language.to_owned(), code: String::new() });
+				self.code_block = Some(CodeBlockState {
+					start_index: index,
+					language: language.to_owned(),
+					code: String::new(),
+				});
 			}
 			Tag::HtmlBlock => self.html_block = Some(String::new()),
 			Tag::List(start) => {
@@ -423,14 +467,14 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 					}
 					None => self.start_tag("ul", class, style),
 				}
+				self.push_source_line(index);
 				self.output.push_str(">\n");
 			}
 			Tag::Item => {
 				if self.is_task_item(index) {
-					self.start_tag("li", "task-list-item", inline::TASK_LIST_ITEM);
-					self.output.push('>');
+					self.block_tag(index, "li", "task-list-item", inline::TASK_LIST_ITEM);
 				} else {
-					self.output.push_str("<li>");
+					self.block_tag(index, "li", "", "");
 				}
 			}
 			Tag::FootnoteDefinition(label) => {
@@ -439,13 +483,13 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			}
 			Tag::Table(alignments) => {
 				self.table = TableState { alignments: alignments.clone(), ..TableState::default() };
-				self.simple_tag("table", inline::TABLE);
+				self.block_tag(index, "table", "", inline::TABLE);
 				self.output.push('\n');
 			}
 			Tag::TableHead => {
 				self.table.is_in_head = true;
 				self.output.push_str("<thead>\n");
-				self.simple_tag("tr", inline::TABLE_ROW);
+				self.block_tag(index, "tr", "", inline::TABLE_ROW);
 				self.output.push('\n');
 				self.table.cell = 0;
 			}
@@ -455,11 +499,9 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 					self.output.push_str("<tbody>\n");
 				}
 				self.table.body_rows += 1;
-				let is_even = self.table.body_rows % 2 == 0;
-				self.simple_tag(
-					"tr",
-					if is_even { inline::EVEN_TABLE_ROW } else { inline::TABLE_ROW },
-				);
+				let is_even = self.table.body_rows.is_multiple_of(2);
+				let style = if is_even { inline::EVEN_TABLE_ROW } else { inline::TABLE_ROW };
+				self.block_tag(index, "tr", "", style);
 				self.output.push('\n');
 				self.table.cell = 0;
 			}
@@ -502,8 +544,8 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			}
 			Tag::MetadataBlock(_) => self.metadata_block = Some(String::new()),
 			Tag::DefinitionList => self.output.push_str("<dl>\n"),
-			Tag::DefinitionListTitle => self.output.push_str("<dt>"),
-			Tag::DefinitionListDefinition => self.output.push_str("<dd>"),
+			Tag::DefinitionListTitle => self.block_tag(index, "dt", "", ""),
+			Tag::DefinitionListDefinition => self.block_tag(index, "dd", "", ""),
 		}
 	}
 
@@ -570,6 +612,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		self.start_tag(&tag, "", style);
 		let anchor = self.heading_anchors.anchor_for(&heading.plain_text);
 		self.push_attribute("id", &anchor);
+		self.push_source_line(heading.start_index);
 		self.output.push('>');
 		self.output.push_str(&content);
 		self.output.push_str("</");
@@ -577,33 +620,38 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		self.output.push_str(">\n");
 	}
 
-	fn start_alert(&mut self, kind: AlertKind) {
+	fn start_alert(&mut self, kind: AlertKind, index: usize) {
 		let alert_style = format!("{}{}", inline::ALERT, kind.border_color());
 		self.start_tag("div", kind.class_name(), &alert_style);
+		self.push_source_line(index);
 		self.output.push_str(">\n");
 		let title_style = format!("{}{}", inline::ALERT_TITLE, kind.title_color());
 		self.start_tag("p", "markdown-alert-title", &title_style);
 		self.output.push('>');
-		self.output.push_str("<svg class=\"octicon mr-2\" viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-hidden=\"true\"");
-		if self.is_inline_styled() {
-			self.push_attribute("fill", kind.title_color());
-			self.push_attribute("style", "vertical-align:text-bottom;margin-right:8px");
-		}
-		self.output.push_str("><path d=\"");
-		self.output.push_str(kind.icon_path());
-		self.output.push_str("\"></path></svg>");
+		let color = match self.options.is_dark && !self.is_inline_styled() {
+			true => kind.dark_title_color(),
+			false => kind.title_color(),
+		};
+		let icon =
+			EmbeddedImage { media_type: "image/svg+xml", bytes: kind.icon_svg(color).into_bytes() };
+		self.start_tag("img", "octicon mr-2", "vertical-align:text-bottom;margin-right:8px");
+		self.push_attribute("src", &icon.data_uri());
+		self.output.push_str(" width=\"16\" height=\"16\" alt=\"\" aria-hidden=\"true\">");
 		self.output.push_str(kind.title());
 		self.output.push_str("</p>\n");
 	}
 
 	fn end_code_block(&mut self) {
-		let Some(CodeBlockState { language, mut code }) = self.code_block.take() else { return };
+		let Some(CodeBlockState { start_index, language, mut code }) = self.code_block.take()
+		else {
+			return;
+		};
 		if code.ends_with('\n') {
 			code.pop();
 		}
 		if language.eq_ignore_ascii_case("math") {
 			// In a paragraph for its margins, like `$$` math.
-			self.simple_tag("p", inline::PARAGRAPH);
+			self.block_tag(start_index, "p", "", inline::PARAGRAPH);
 			self.push_math(&code, true);
 			self.output.push_str("</p>\n");
 			return;
@@ -612,7 +660,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			true => Vec::new(),
 			false => (self.options.highlight_code)(&language, &code),
 		};
-		self.simple_tag("pre", inline::CODE_BLOCK);
+		self.block_tag(start_index, "pre", "", inline::CODE_BLOCK);
 		self.simple_tag("code", inline::CODE_BLOCK_CODE);
 		self.push_highlighted_code(&code, &spans);
 		self.output.push_str("</code></pre>\n");
@@ -675,7 +723,12 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			})
 			.collect();
 		let Some(entries) = entries.filter(|entries| !entries.is_empty()) else {
-			self.code_block = Some(CodeBlockState { language: "yaml".to_owned(), code: yaml });
+			// Front matter has no line of its own in the preview.
+			self.code_block = Some(CodeBlockState {
+				start_index: usize::MAX,
+				language: "yaml".to_owned(),
+				code: yaml,
+			});
 			self.end_code_block();
 			return;
 		};
@@ -822,6 +875,16 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		}
 		self.output.push_str("</ol>\n</section>\n");
 	}
+}
+
+/// The zero based line of each byte offset in `text`, for offsets in ascending order or not.
+pub(crate) fn source_lines_of_offsets(text: &str, offsets: &[usize]) -> Vec<usize> {
+	let line_starts: Vec<usize> =
+		std::iter::once(0).chain(text.match_indices('\n').map(|(index, _)| index + 1)).collect();
+	offsets
+		.iter()
+		.map(|&offset| line_starts.partition_point(|&start| start <= offset).saturating_sub(1))
+		.collect()
 }
 
 fn footnote_reference_id(number: usize, use_number: usize) -> String {

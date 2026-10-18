@@ -5,6 +5,7 @@ mod header_parser;
 mod icon_preview;
 mod json;
 mod npp_interface;
+mod plugin_build;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,6 +14,9 @@ const USAGE: &str = "\
 Usage: cargo xtask <task>
 
 Tasks:
+  build <x64|x86> [<cargo build arguments>]
+      Builds NppToolBox.dll in release mode. Links with <arch>-w64-mingw32-gcc, or with a
+      MinGW-w64 gcc supporting -m64/-m32 if the former is missing.
   update-npp-interface [--version <version>]
       Regenerates crates/npp/src/interface.rs from the official Notepad++ headers.
       <version> is e.g. 8.9.8. The default is the newest release (\"latest\").
@@ -28,6 +32,11 @@ fn main() -> ExitCode {
 	let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 	let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
 	let result = match arguments.first().map(String::as_str) {
+		Some("build") => plugin_build::build(
+			&workspace_root,
+			arguments.get(1).map(String::as_str),
+			arguments.get(2..).unwrap_or_default(),
+		),
 		Some("update-npp-interface") => option_value(&arguments, "--version")
 			.and_then(|version| npp_interface::update(&workspace_root, version)),
 		Some("update-emoji") => option_value(&arguments, "--revision")

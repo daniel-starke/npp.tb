@@ -41,10 +41,11 @@ fn www_link(text: &str, start: usize) -> Option<Autolink> {
 	if !bytes[start..].starts_with(b"www.") {
 		return None;
 	}
-	if let Some(&previous) = start.checked_sub(1).map(|index| &bytes[index]) {
-		if !previous.is_ascii_whitespace() && !b"*_~(".contains(&previous) {
-			return None;
-		}
+	if let Some(&previous) = start.checked_sub(1).map(|index| &bytes[index])
+		&& !previous.is_ascii_whitespace()
+		&& !b"*_~(".contains(&previous)
+	{
+		return None;
 	}
 	let domain_length = domain_length(&bytes[start..], false)?;
 	let end = trim_link_end(bytes, start, extend_to_path_end(bytes, start + domain_length))?;

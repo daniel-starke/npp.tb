@@ -14,13 +14,18 @@ mod image_embedding;
 #[cfg(windows)]
 mod lexer_highlighter;
 mod markdown_html;
+mod markdown_rtf;
 mod markdown_table;
 mod rewrap;
 mod settings;
+mod svg_animation;
 mod text_width;
 
 #[cfg(windows)]
 mod commands;
+#[cfg(windows)]
+mod viewer;
+mod viewer_page;
 
 #[cfg(windows)]
 mod toolbar_icons {
@@ -62,6 +67,12 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 			shortcut: Some(Shortcut::ctrl_alt_shift(b'H')),
 			toolbar_icon: Some(&toolbar_icons::COPY_AS_HTML),
 		}),
+		MenuEntry::Command(Command {
+			menu_name: "Markdown Viewer",
+			run: commands::markdown_viewer,
+			shortcut: Some(Shortcut::ctrl_alt(b'M')),
+			toolbar_icon: Some(&toolbar_icons::MARKDOWN_VIEWER),
+		}),
 		MenuEntry::Separator,
 		MenuEntry::Command(Command {
 			menu_name: "Settings",
@@ -76,6 +87,8 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 			toolbar_icon: None,
 		}),
 	],
+	on_notification: commands::on_notification,
+	shows_toolbar_icon: commands::shows_toolbar_icon,
 };
 
 #[cfg(windows)]
