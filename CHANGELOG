@@ -4,6 +4,33 @@ M.N.P
 | +---- minor: increased if syntax/semantic breaking changes were applied
 +------ major: increased if elementary changes (from user's point of view) were made
 
+3.0.0 (2026-11-08)
+ - added: Mermaid diagrams drawn in Render HTML, Copy as HTML and the Markdown Viewer
+ - added: all diagram types of Mermaid 12.2.0, including the beta ones, with an own renderer
+ - added: Mermaid themes, the looks classic, neo and handDrawn and the layouts elk and dagre
+ - added: math, Font Awesome icons and architecture icons in Mermaid diagrams
+ - added: Mermaid diagrams as PNG pictures in the RichEdit viewer and in Copy as HTML
+ - added: settings section [Mermaid] (Enabled, MaxTextSize, MaxEdges)
+ - added: more TeX commands in math: KaTeX's symbols, \def, \newcommand, \href, \colorbox, CD
+ - added: equation numbers in math with \tag, \label, \ref and \eqref
+ - added: Compact Markdown Table (Ctrl+Alt+P, toolbar icon off by default) removes cell padding
+ - added: language Markdown (NppToolBox) colors Markdown in the editor, code blocks by their lexer
+ - added: setting [Lexer] Markdown (0: off, 1: language, 2: used for all Markdown files)
+ - added: Render HTML and Copy as HTML show code documents as a code block of their language
+ - added: setting [Html] CodeAsCodeBlock (on by default)
+ - changed: DLL is about 5 MiB larger (diagram renderer, themes and icons)
+ - changed: build feature font-awesome (on by default) holds the icons of Mermaid diagrams
+
+2.1.0 (2026-11-01)
+ - added: Select Comments (Ctrl+Alt+N, toolbar icon off by default) selects all comments
+ - added: RichEdit viewer shows all image formats with a Windows Imaging Component (WIC) codec
+ - added: TIFF, JPEG XL, HEIF, JPEG XR and DDS images embedded like the other local images
+ - changed: Render HTML toolbar icon off by default (setting [Toolbar] RenderHtml)
+ - changed: images decoded and PNG encoded with WIC (DLL is about 500 KiB smaller)
+ - changed: build feature pure-rust decodes images with Rust crates as before
+ - fixed: activating Notepad++ no longer raises the detached viewer window above other windows
+ - fixed: crash of EdgeHTML viewer by commands sent from another programs
+
 2.0.0 (2026-10-18)
  - added: Markdown Viewer (Ctrl+Alt+M, toolbar) with a live preview of the active document
  - added: viewer docked as side panel or detached to a maximizable window (Detach/Dock button)

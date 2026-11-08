@@ -21,9 +21,12 @@ use crate::PLUGIN_NAME;
 use crate::commands::{read_setting, settings_file};
 use crate::image_embedding::ImageEmbedding;
 use crate::lexer_highlighter::LexerHighlighter;
+use crate::mermaid::{DiagramRenderer, Limits};
 use crate::settings::{self, Setting};
 use crate::viewer_page::{LinkTarget, link_base_url};
+use crate::{mermaid_clock, mermaid_image, mermaid_text};
 use engine::{Engine, EngineKind, ImageCache, RenderInput};
+pub(crate) use window::screen_width;
 use window::{Timer, ViewerWindows};
 
 thread_local! {
@@ -40,10 +43,10 @@ const SYNC_DELAY_MILLISECONDS: u32 = 30;
 const LINK_HOVER_CHECK_MILLISECONDS: u32 = 100;
 
 /// Opened with the default application instead of Notepad++ when a link points to them.
-const NON_TEXT_EXTENSIONS: [&str; 30] = [
-	"png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "avif", "tif", "tiff", "pdf", "doc",
-	"docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "zip", "7z", "rar", "gz", "exe", "msi",
-	"htm", "html", "mp3", "mp4",
+const NON_TEXT_EXTENSIONS: [&str; 37] = [
+	"png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "avif", "tif", "tiff", "jxl", "heic",
+	"heif", "jxr", "wdp", "hdp", "dds", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt",
+	"ods", "zip", "7z", "rar", "gz", "exe", "msi", "htm", "html", "mp3", "mp4",
 ];
 
 struct Viewer {
@@ -57,6 +60,8 @@ struct Viewer {
 	/// Cleared when switching documents.
 	images: ImageCache,
 	highlighter: LexerHighlighter,
+	/// Keeps the recent Mermaid diagrams.
+	diagrams: DiagramRenderer,
 	/// The location of the hovered link, shown in the link bar.
 	hovered_link: Option<String>,
 }
@@ -71,6 +76,13 @@ fn with_viewer<R>(action: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
 
 fn setting(notepad: &Notepad, setting: &Setting) -> u32 {
 	read_setting(settings_file(notepad).as_ref(), setting)
+}
+
+pub(crate) fn mermaid_limits(notepad: &Notepad) -> Limits {
+	Limits {
+		max_text_size: setting(notepad, &settings::MERMAID_MAX_TEXT_SIZE) as usize,
+		max_edges: setting(notepad, &settings::MERMAID_MAX_EDGES) as usize,
+	}
 }
 
 fn write_setting(notepad: &Notepad, setting: &Setting, value: u32) {
@@ -112,6 +124,12 @@ fn create(notepad: &Notepad) -> bool {
 			is_dark,
 			images: ImageCache::default(),
 			highlighter: LexerHighlighter::new(notepad),
+			diagrams: DiagramRenderer::new(
+				mermaid_text::text_system(),
+				mermaid_clock::system_clock(),
+				mermaid_image::decoder(),
+				Limits::default(),
+			),
 			hovered_link: None,
 		});
 	});
@@ -138,7 +156,7 @@ fn show() {
 	});
 	set_menu_checked(&notepad, true);
 	// Showing a panel focuses it, but the user usually goes on writing.
-	window::focus(notepad.current_scintilla().window());
+	focus_editor(&notepad, &windows);
 	windows.start_timer(Timer::Render, 0);
 }
 
@@ -175,6 +193,13 @@ fn panel_closed() {
 	}
 }
 
+/// Focuses the editor and keeps the separate window above Notepad++. The EdgeHTML control
+/// activates the separate window when it is created, so focusing the editor raises Notepad++.
+fn focus_editor(notepad: &Notepad, windows: &ViewerWindows) {
+	window::focus(notepad.current_scintilla().window());
+	windows.raise_frame();
+}
+
 fn set_menu_checked(notepad: &Notepad, is_checked: bool) {
 	if let Some(command_id) = npp::plugin::command_id_of(crate::commands::markdown_viewer) {
 		notepad.set_menu_item_checked(command_id, is_checked);
@@ -194,6 +219,8 @@ fn toggle_detached() {
 		if is_detached {
 			notepad.hide_docking_panel(windows.panel());
 			windows.open_frame(&notepad);
+			// The focused button moved out of Notepad++ with the host.
+			focus_editor(&notepad, &windows);
 		} else {
 			windows.close_frame();
 			windows.show_docked(&notepad);
@@ -419,6 +446,9 @@ impl Viewer {
 		let directory = self.document_directory();
 		let max_image_bytes = setting(&self.notepad, &settings::MAX_EMBEDDED_IMAGE_BYTES);
 		let highlights_code = setting(&self.notepad, &settings::HIGHLIGHT_CODE) == 1;
+		let renders_diagrams = setting(&self.notepad, &settings::RENDER_MERMAID) == 1;
+		self.diagrams.limits = mermaid_limits(&self.notepad);
+		self.diagrams.screen_width = screen_width(self.windows.host());
 		let highlighter = &mut self.highlighter;
 		let mut highlight_code = |language: &str, code: &str| match highlights_code {
 			true => highlighter.highlight(language, code),
@@ -432,6 +462,7 @@ impl Viewer {
 			},
 			images: &mut self.images,
 			highlight_code: &mut highlight_code,
+			diagrams: renders_diagrams.then_some(&mut self.diagrams),
 			base_url: link_base_url(directory.as_deref()),
 		});
 		if self.is_detached {

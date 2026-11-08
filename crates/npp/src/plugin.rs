@@ -10,6 +10,7 @@ use crate::ffi::{
 	SciNotification, ShortcutKey, npp_notification,
 };
 use crate::icon::ToolbarIcon;
+use crate::lexer::Lexer;
 use crate::notepad::Notepad;
 use crate::toolbar_icon_handles::create_toolbar_icon_handles;
 use crate::wide::{to_fixed_wide, to_wide_null_terminated};
@@ -29,6 +30,18 @@ pub struct PluginDefinition {
 	pub on_notification: fn(&Notepad, &SciNotification),
 	/// Whether the toolbar icon of a command is added, e.g. depending on a user setting.
 	pub shows_toolbar_icon: fn(&Notepad, &Command) -> bool,
+	/// The external lexers Notepad++ adds to its languages, asked once when it loads the
+	/// plugin. Because the plugin exports the lexer functions, Notepad++ refuses to load it
+	/// without the styles file `plugins/Config/<name>.xml` (in the program directory or
+	/// `NPPM_GETPLUGINSCONFIGDIR`), so this function must make sure the file exists, also when
+	/// it returns no lexers.
+	pub lexers: fn(&Notepad) -> &'static [LexerDefinition],
+}
+
+pub struct LexerDefinition {
+	/// The language name in the menu, the styles file and `CreateLexer`, at most 127 bytes.
+	pub name: &'static core::ffi::CStr,
+	pub create: fn(&Notepad) -> Box<dyn Lexer>,
 }
 
 pub enum MenuEntry {
@@ -78,6 +91,7 @@ unsafe impl Sync for MenuItems {}
 static PLUGIN_STATE: OnceLock<PluginState> = OnceLock::new();
 static PLUGIN_NAME: OnceLock<Vec<u16>> = OnceLock::new();
 static MENU_ITEMS: OnceLock<MenuItems> = OnceLock::new();
+static LEXERS: OnceLock<&'static [LexerDefinition]> = OnceLock::new();
 
 /// `FuncItem` carries no context pointer, so every menu entry gets its own monomorphized
 /// trampoline that knows its index.
@@ -97,6 +111,11 @@ macro_rules! menu_entry_trampolines {
 const MENU_ENTRY_TRAMPOLINES: [PluginCommandFunction; MAX_MENU_ENTRIES] = menu_entry_trampolines!(
 	0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
 );
+
+/// The Notepad++ main window, once Notepad++ has called `setInfo`.
+pub fn notepad() -> Option<Notepad> {
+	PLUGIN_STATE.get().map(|state| state.notepad)
+}
 
 /// The menu index of the command running `run`, e.g. for [`crate::ffi::DockedWidgetData`].
 pub fn menu_index_of(run: fn(&Notepad)) -> Option<usize> {
@@ -209,6 +228,46 @@ pub mod exports {
 		(state.definition.on_notification)(&state.notepad, notification);
 	}
 
+	fn lexers() -> &'static [LexerDefinition] {
+		let Some(state) = PLUGIN_STATE.get() else { return &[] };
+		LEXERS.get_or_init(|| (state.definition.lexers)(&state.notepad))
+	}
+
+	pub fn lexer_count() -> i32 {
+		lexers().len() as i32
+	}
+
+	/// # Safety
+	/// `name` must be null or valid for writes of `capacity` bytes.
+	pub unsafe fn lexer_name(index: u32, name: *mut core::ffi::c_char, capacity: i32) {
+		let Ok(capacity) = usize::try_from(capacity) else { return };
+		if name.is_null() || capacity == 0 {
+			return;
+		}
+		let bytes = lexers().get(index as usize).map_or(&[][..], |lexer| lexer.name.to_bytes());
+		let length = bytes.len().min(capacity - 1);
+		// SAFETY: `length + 1 <= capacity` bytes are written, guaranteed valid by the caller.
+		unsafe {
+			core::ptr::copy_nonoverlapping(bytes.as_ptr(), name.cast::<u8>(), length);
+			*name.add(length) = 0;
+		}
+	}
+
+	/// # Safety
+	/// `name` must be null or a NUL terminated string.
+	pub unsafe fn create_lexer(name: *const core::ffi::c_char) -> *mut core::ffi::c_void {
+		let Some(state) = PLUGIN_STATE.get() else { return core::ptr::null_mut() };
+		if name.is_null() {
+			return core::ptr::null_mut();
+		}
+		// SAFETY: Guaranteed by the caller.
+		let name = unsafe { core::ffi::CStr::from_ptr(name) };
+		match lexers().iter().find(|lexer| lexer.name == name) {
+			Some(lexer) => crate::lexer::into_raw_lexer((lexer.create)(&state.notepad)).cast(),
+			None => core::ptr::null_mut(),
+		}
+	}
+
 	fn to_func_item(index: usize, entry: &MenuEntry) -> FuncItem {
 		let (item_name, function, shortcut_key) = match entry {
 			MenuEntry::Separator => ([0; MENU_ITEM_NAME_CAPACITY], None, core::ptr::null_mut()),
@@ -256,7 +315,9 @@ pub mod exports {
 }
 
 /// Exports the Notepad++ plugin ABI (`setInfo`, `getName`, `getFuncsArray`, `beNotified`,
-/// `messageProc`, `isUnicode`) for the given `static` [`PluginDefinition`].
+/// `messageProc`, `isUnicode`) and the Lexilla lexer library functions (`GetLexerCount`,
+/// `GetLexerName`, `CreateLexer`, `__stdcall` like `LEXILLA_CALL`) for the given `static`
+/// [`PluginDefinition`].
 #[macro_export]
 macro_rules! export_plugin {
 	($definition:path) => {
@@ -294,6 +355,36 @@ macro_rules! export_plugin {
 		pub unsafe extern "C" fn beNotified(notification: *const $crate::ffi::NotificationHeader) {
 			// SAFETY: Notepad++ passes a valid notification.
 			unsafe { $crate::plugin::exports::notify(notification) }
+		}
+
+		#[allow(non_snake_case)]
+		#[unsafe(no_mangle)]
+		pub extern "system" fn GetLexerCount() -> i32 {
+			$crate::plugin::exports::lexer_count()
+		}
+
+		/// # Safety
+		/// Called by Notepad++ with a buffer of `capacity` bytes.
+		#[allow(non_snake_case)]
+		#[unsafe(no_mangle)]
+		pub unsafe extern "system" fn GetLexerName(
+			index: u32,
+			name: *mut ::core::ffi::c_char,
+			capacity: i32,
+		) {
+			// SAFETY: Notepad++ passes a valid buffer.
+			unsafe { $crate::plugin::exports::lexer_name(index, name, capacity) }
+		}
+
+		/// # Safety
+		/// Called by Notepad++ with a NUL terminated lexer name.
+		#[allow(non_snake_case)]
+		#[unsafe(no_mangle)]
+		pub unsafe extern "system" fn CreateLexer(
+			name: *const ::core::ffi::c_char,
+		) -> *mut ::core::ffi::c_void {
+			// SAFETY: Notepad++ passes a valid string.
+			unsafe { $crate::plugin::exports::create_lexer(name) }
 		}
 
 		#[allow(non_snake_case)]

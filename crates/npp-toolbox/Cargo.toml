@@ -13,6 +13,13 @@ build = "build.rs"
 name = "NppToolBox"
 crate-type = ["cdylib"]
 
+[features]
+default = ["font-awesome"]
+# The Font Awesome Free icons of Mermaid diagrams, about 0.8 MB of the DLL.
+font-awesome = []
+# Images without the Windows Imaging Component, see the `pure-rust` feature of `npp`.
+pure-rust = ["npp/pure-rust"]
+
 [dependencies]
 npp.workspace = true
 unicode-width.workspace = true

@@ -60,6 +60,46 @@ pub const HIGHLIGHT_CODE: Setting = Setting {
 	description: "1: color code blocks with the Notepad++ lexer of their language, 0: plain code.",
 };
 
+pub const CODE_AS_CODE_BLOCK: Setting = Setting {
+	section: "Html",
+	key: "CodeAsCodeBlock",
+	default: 1,
+	allowed: 0..=1,
+	description: "1: Render HTML and Copy as HTML show a document with a language other than Normal Text and Markdown as a code block of that language, 0: as Markdown.",
+};
+
+pub const MARKDOWN_LEXER: Setting = Setting {
+	section: "Lexer",
+	key: "Markdown",
+	default: 1,
+	allowed: 0..=2,
+	description: "0: off, 1: add the language \"Markdown (NppToolBox)\" to Notepad++, which it uses for Markdown files that no user defined language claims, 2: use it for every Markdown file. Applies after restarting Notepad++.",
+};
+
+pub const RENDER_MERMAID: Setting = Setting {
+	section: "Mermaid",
+	key: "Enabled",
+	default: 1,
+	allowed: 0..=1,
+	description: "1: render ```mermaid code blocks as diagrams, 0: show their code.",
+};
+
+pub const MERMAID_MAX_TEXT_SIZE: Setting = Setting {
+	section: "Mermaid",
+	key: "MaxTextSize",
+	default: 50_000,
+	allowed: 1..=10_000_000,
+	description: "Larger diagrams (in bytes) are not rendered, against blocking Notepad++.",
+};
+
+pub const MERMAID_MAX_EDGES: Setting = Setting {
+	section: "Mermaid",
+	key: "MaxEdges",
+	default: 500,
+	allowed: 1..=100_000,
+	description: "Diagrams with more edges are not rendered, against blocking Notepad++.",
+};
+
 pub const VIEWER_ENGINE: Setting = Setting {
 	section: "Viewer",
 	key: "Engine",
@@ -95,23 +135,25 @@ pub const VIEWER_UPDATE_DELAY: Setting = Setting {
 /// Toolbar icons by the menu name of their command, see [`toolbar_key`]. Changes apply on the
 /// next start of Notepad++.
 macro_rules! toolbar_setting {
-	($key:literal) => {
+	($key:literal, $default:literal) => {
 		Setting {
 			section: "Toolbar",
 			key: $key,
-			default: 1,
+			default: $default,
 			allowed: 0..=1,
 			description: "1: show the toolbar icon, 0: hide it. Applies after restarting Notepad++.",
 		}
 	};
 }
 
-pub const TOOLBAR_SETTINGS: [Setting; 5] = [
-	toolbar_setting!("RealignMarkdownTable"),
-	toolbar_setting!("Rewrap"),
-	toolbar_setting!("RenderHtml"),
-	toolbar_setting!("CopyAsHtml"),
-	toolbar_setting!("MarkdownViewer"),
+pub const TOOLBAR_SETTINGS: [Setting; 7] = [
+	toolbar_setting!("RealignMarkdownTable", 1),
+	toolbar_setting!("CompactMarkdownTable", 0),
+	toolbar_setting!("Rewrap", 1),
+	toolbar_setting!("SelectComments", 0),
+	toolbar_setting!("RenderHtml", 0),
+	toolbar_setting!("CopyAsHtml", 1),
+	toolbar_setting!("MarkdownViewer", 1),
 ];
 
 /// The setting of the toolbar icon of the command named `menu_name`.
@@ -134,12 +176,17 @@ pub fn toolbar_key(menu_name: &str) -> String {
 }
 
 /// All settings in the order of the settings file.
-pub const ALL: [&Setting; 14] = [
+pub const ALL: [&Setting; 21] = [
 	&MAX_LINE_WIDTH,
 	&EMBED_MARKDOWN_IMAGES,
 	&EMBED_HTML_IMAGES,
 	&MAX_EMBEDDED_IMAGE_BYTES,
 	&HIGHLIGHT_CODE,
+	&CODE_AS_CODE_BLOCK,
+	&MARKDOWN_LEXER,
+	&RENDER_MERMAID,
+	&MERMAID_MAX_TEXT_SIZE,
+	&MERMAID_MAX_EDGES,
 	&VIEWER_ENGINE,
 	&VIEWER_FOLLOWS_CARET,
 	&VIEWER_DETACHED,
@@ -149,6 +196,8 @@ pub const ALL: [&Setting; 14] = [
 	&TOOLBAR_SETTINGS[2],
 	&TOOLBAR_SETTINGS[3],
 	&TOOLBAR_SETTINGS[4],
+	&TOOLBAR_SETTINGS[5],
+	&TOOLBAR_SETTINGS[6],
 ];
 
 /// A new settings file with every setting at its default value and described.
@@ -182,7 +231,9 @@ mod tests {
 		assert!(template.contains("\n[Rewrap]\n; Maximum number"));
 		assert!(template.contains("\nMaxLineWidth=80\n\n[Html]\n"));
 		assert!(template.contains("\nMaxEmbeddedImageBytes=10485760\n"));
-		assert_eq!(template.matches("\n[").count(), 4);
+		assert_eq!(template.matches("\n[").count(), 6);
+		assert!(template.contains("\nCodeAsCodeBlock=1\n\n[Lexer]\n"));
+		assert!(template.contains("\nMarkdown=1\n\n[Mermaid]\n"));
 		assert!(template.contains("\n[Toolbar]\n; 1: show the toolbar icon"));
 		for setting in ALL {
 			assert!(setting.allowed.contains(&setting.default), "{}", setting.key);
@@ -195,6 +246,7 @@ mod tests {
 		assert_eq!(toolbar_key("Copy as HTML"), "CopyAsHtml");
 		assert_eq!(toolbar_key("Rewrap..."), "Rewrap");
 		assert!(toolbar_setting("Realign Markdown Table").is_some());
+		assert!(toolbar_setting("Compact Markdown Table").is_some());
 		assert!(toolbar_setting("Settings").is_none());
 	}
 

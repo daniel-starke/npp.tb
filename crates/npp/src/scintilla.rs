@@ -212,38 +212,119 @@ impl Scintilla {
 		self.send_message(scintilla_message::COLOURISE, 0, -1);
 	}
 
+	/// Styles at least `range` with the lexer.
+	pub fn colourise(&self, range: Range<isize>) {
+		self.send_message(scintilla_message::COLOURISE, range.start as WPARAM, range.end);
+	}
+
 	/// The style of every byte of the document.
 	pub fn styles(&self) -> Vec<u8> {
-		let length = self.length().max(0);
+		self.styles_in(0..self.length())
+	}
+
+	/// The style of every byte in `range`.
+	pub fn styles_in(&self, range: Range<isize>) -> Vec<u8> {
+		let length = (range.end - range.start).max(0) as usize;
 		// Scintilla writes byte and style pairs plus two terminating NULs.
-		let mut styled_text = vec![0u8; 2 * length as usize + 2];
-		let mut request =
-			TextRangeFull { min: 0, max: length, text: styled_text.as_mut_ptr().cast() };
+		let mut styled_text = vec![0u8; 2 * length + 2];
+		let mut request = TextRangeFull {
+			min: range.start,
+			max: range.end,
+			text: styled_text.as_mut_ptr().cast(),
+		};
 		self.send_message(scintilla_message::GET_STYLED_TEXT_FULL, 0, &raw mut request as LPARAM);
-		styled_text
-			.as_chunks::<2>()
-			.0
-			.iter()
-			.take(length as usize)
-			.map(|&[_, style]| style)
-			.collect()
+		styled_text.as_chunks::<2>().0.iter().take(length).map(|&[_, style]| style).collect()
 	}
 
 	/// The lexer's tags of `style`, e.g. `literal string`. Empty if the lexer has none.
 	pub fn style_tags(&self, style: u8) -> String {
-		let length = self.send_message(scintilla_message::TAGS_OF_STYLE, usize::from(style), 0);
+		self.ascii_result(scintilla_message::TAGS_OF_STYLE, usize::from(style))
+	}
+
+	/// The Lexilla name of the document's lexer, e.g. `cpp`, or `user` for Notepad++'s user
+	/// defined languages.
+	pub fn lexer_language(&self) -> String {
+		self.ascii_result(scintilla_message::GET_LEXER_LANGUAGE, 0)
+	}
+
+	/// Copies the font, size and background of `source` to `style`, as Scintilla stores them.
+	pub fn copy_style_font_and_background(&self, source: u8, style: u8) {
+		let font = self.ascii_result(scintilla_message::STYLE_GET_FONT, usize::from(source));
+		let font = null_terminated_bytes(font.as_bytes());
+		let size =
+			self.send_message(scintilla_message::STYLE_GET_SIZE_FRACTIONAL, usize::from(source), 0);
+		let background = self.style_background(source);
+		let style = usize::from(style);
+		self.send_message(scintilla_message::STYLE_SET_FONT, style, font.as_ptr() as LPARAM);
+		self.send_message(scintilla_message::STYLE_SET_SIZE_FRACTIONAL, style, size);
+		self.send_message(scintilla_message::STYLE_SET_BACK, style, background as LPARAM);
+	}
+
+	/// The text color of `style` as `0xBBGGRR`.
+	pub fn style_foreground(&self, style: u8) -> u32 {
+		self.send_message(scintilla_message::STYLE_GET_FORE, usize::from(style), 0) as u32
+	}
+
+	/// The background color of `style` as `0xBBGGRR`.
+	pub fn style_background(&self, style: u8) -> u32 {
+		self.send_message(scintilla_message::STYLE_GET_BACK, usize::from(style), 0) as u32
+	}
+
+	/// Sets the text color of `style` (`0xBBGGRR`).
+	pub fn set_style_foreground(&self, style: u8, color: u32) {
+		self.send_message(scintilla_message::STYLE_SET_FORE, usize::from(style), color as LPARAM);
+	}
+
+	pub fn set_style_font_style(
+		&self,
+		style: u8,
+		is_bold: bool,
+		is_italic: bool,
+		is_underlined: bool,
+	) {
+		let style = usize::from(style);
+		self.send_message(scintilla_message::STYLE_SET_BOLD, style, LPARAM::from(is_bold));
+		self.send_message(scintilla_message::STYLE_SET_ITALIC, style, LPARAM::from(is_italic));
+		self.send_message(
+			scintilla_message::STYLE_SET_UNDERLINE,
+			style,
+			LPARAM::from(is_underlined),
+		);
+	}
+
+	/// Whether the background of `style` fills the rest of the line after its last character.
+	pub fn set_style_eol_filled(&self, style: u8, is_filled: bool) {
+		self.send_message(
+			scintilla_message::STYLE_SET_EOL_FILLED,
+			usize::from(style),
+			LPARAM::from(is_filled),
+		);
+	}
+
+	/// Replaces the selection by one selection per range, each with the caret at its end. The
+	/// first range becomes the main selection and is scrolled into view.
+	pub fn select_ranges(&self, ranges: &[Range<isize>]) {
+		let Some((first, others)) = ranges.split_first() else { return };
+		self.send_message(scintilla_message::SET_SELECTION, first.end as WPARAM, first.start);
+		for range in others {
+			self.send_message(scintilla_message::ADD_SELECTION, range.end as WPARAM, range.start);
+		}
+		self.send_message(scintilla_message::SET_MAIN_SELECTION, 0, 0);
+		self.send_message(scintilla_message::SCROLL_CARET, 0, 0);
+	}
+
+	/// The text of a message that writes a string to `lParam`, or returns its length without
+	/// NUL for a null `lParam`.
+	fn ascii_result(&self, message: u32, wparam: WPARAM) -> String {
+		let length = self.send_message(message, wparam, 0);
 		let Ok(length) = usize::try_from(length) else { return String::new() };
 		if length == 0 {
 			return String::new();
 		}
-		let mut tags = vec![0u8; length + 1];
-		self.send_message(
-			scintilla_message::TAGS_OF_STYLE,
-			usize::from(style),
-			tags.as_mut_ptr() as LPARAM,
-		);
-		tags.truncate(length);
-		String::from_utf8_lossy(&tags).into_owned()
+		let mut text = vec![0u8; length + 1];
+		self.send_message(message, wparam, text.as_mut_ptr() as LPARAM);
+		text.truncate(length);
+		String::from_utf8_lossy(&text).into_owned()
 	}
 
 	fn is_utf8(&self) -> bool {

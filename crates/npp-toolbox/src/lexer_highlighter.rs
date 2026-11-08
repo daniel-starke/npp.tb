@@ -7,18 +7,14 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use npp::{Notepad, Scintilla};
 
 use crate::code_highlight::{
-	CodeLanguage, KeywordSets, StylerEntry, code_language, keyword_set_index, language_keywords,
-	lexer_styles, spans_of_styles, token_kind_of_style,
+	CodeLanguage, StylerEntry, code_language, keyword_sets, lexer_styles, spans_of_styles,
+	token_kind_of_style,
 };
 use crate::markdown_html::HighlightedSpan;
 
 /// The hidden editor, created once and reused. Notepad++ destroys it on exit. Stored as an
 /// integer because window handles are raw pointers.
 static HIDDEN_EDITOR: AtomicIsize = AtomicIsize::new(0);
-
-/// The languages whose keywords the HTML lexer uses for embedded scripts, with their
-/// keyword set index.
-const HTML_KEYWORD_SOURCES: [(usize, &str); 3] = [(0, "html"), (1, "javascript"), (4, "php")];
 
 pub struct LexerHighlighter {
 	notepad: Notepad,
@@ -79,39 +75,7 @@ impl LexerHighlighter {
 		language: &CodeLanguage,
 		styles: &[StylerEntry],
 	) {
-		let mut keyword_sets: Vec<(usize, String)> = Vec::new();
-		if language.keyword_sets == KeywordSets::Html {
-			for (set, notepad_name) in HTML_KEYWORD_SOURCES {
-				let keywords = language_keywords(self.langs_xml(), notepad_name);
-				if let Some((_, keywords)) =
-					keywords.into_iter().find(|(list, _)| list == "instre1")
-				{
-					keyword_sets.push((set, keywords));
-				}
-			}
-		} else {
-			for (list, keywords) in language_keywords(self.langs_xml(), language.notepad_name) {
-				if let Some(set) = keyword_set_index(language.keyword_sets, &list) {
-					keyword_sets.push((set, keywords));
-				}
-			}
-		}
-		// Keywords the user added in the Style Configurator.
-		for style in styles {
-			let Some(list) = &style.keyword_list else { continue };
-			let Some(set) = keyword_set_index(language.keyword_sets, list) else { continue };
-			if style.extra_keywords.trim().is_empty() {
-				continue;
-			}
-			match keyword_sets.iter_mut().find(|(existing, _)| *existing == set) {
-				Some((_, keywords)) => {
-					keywords.push(' ');
-					keywords.push_str(&style.extra_keywords);
-				}
-				None => keyword_sets.push((set, style.extra_keywords.clone())),
-			}
-		}
-		for (set, keywords) in keyword_sets {
+		for (set, keywords) in keyword_sets(language, self.langs_xml(), styles) {
 			editor.set_keywords(set, &keywords);
 		}
 	}
@@ -129,7 +93,7 @@ impl LexerHighlighter {
 
 /// `<settings dir>/<name>.xml`, or the `<name>.model.xml` Notepad++ ships with. Empty if
 /// neither can be read. The code is then highlighted without keywords.
-fn read_configuration(notepad: &Notepad, name: &str) -> String {
+pub(crate) fn read_configuration(notepad: &Notepad, name: &str) -> String {
 	let candidates: [Option<PathBuf>; 2] = [
 		notepad.settings_directory().map(|directory| directory.join(format!("{name}.xml"))),
 		notepad.program_directory().map(|directory| directory.join(format!("{name}.model.xml"))),

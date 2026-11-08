@@ -17,6 +17,7 @@ use super::window::{self, ContextMenu, ViewerMessage};
 use crate::image_embedding::{EmbeddedImage, ImageEmbedding};
 use crate::markdown_html::{HighlightedSpan, ImageSyntax, RenderOptions, Styling, render_markdown};
 use crate::markdown_rtf::{DARK_THEME, LIGHT_THEME, RtfDocument, RtfOptions, RtfTheme, render_rtf};
+use crate::mermaid::DiagramRenderer;
 use crate::svg_animation::css_animated_image;
 use crate::viewer_page::{
 	CLEAR_SELECTION_SCRIPT, CONTEXT_MENU_SCRIPT, ContextMenuRequest, LINK_HOVER_SCRIPT, LinkTarget,
@@ -51,17 +52,43 @@ impl EngineKind {
 pub struct ImageCache {
 	images: HashMap<String, Option<Rc<EmbeddedImage>>>,
 	data_uris: HashMap<String, Option<Rc<str>>>,
+	/// Images of formats RichEdit cannot show, converted to PNG.
+	#[cfg(not(feature = "pure-rust"))]
+	pictures: HashMap<String, Option<Rc<EmbeddedImage>>>,
 }
 
 impl ImageCache {
 	pub fn clear(&mut self) {
 		self.images.clear();
 		self.data_uris.clear();
+		#[cfg(not(feature = "pure-rust"))]
+		self.pictures.clear();
 	}
 
 	fn load(&mut self, embedding: &ImageEmbedding, source: &str) -> Option<Rc<EmbeddedImage>> {
 		let image = self.images.entry(source.to_owned());
 		image.or_insert_with(|| embedding.load(source).map(Rc::new)).clone()
+	}
+
+	/// The local image `source` for RichEdit, which only shows PNG and JPEG pictures. WIC converts
+	/// the other formats it can decode to PNG.
+	fn picture(&mut self, embedding: &ImageEmbedding, source: &str) -> Option<Rc<EmbeddedImage>> {
+		#[cfg(feature = "pure-rust")]
+		return self.load(embedding, source);
+		#[cfg(not(feature = "pure-rust"))]
+		{
+			if let Some(picture) = self.pictures.get(source) {
+				return picture.clone();
+			}
+			let picture = self.load(embedding, source).map(|image| match image.media_type {
+				"image/png" | "image/jpeg" => image,
+				_ => npp::wic::transcode_to_png(&image.bytes).map_or(image, |bytes| {
+					Rc::new(EmbeddedImage { media_type: "image/png", bytes })
+				}),
+			});
+			self.pictures.insert(source.to_owned(), picture.clone());
+			picture
+		}
 	}
 
 	/// The `data:` URI of the local image `source`. `css_animations` converts the SMIL animations of
@@ -89,6 +116,8 @@ pub struct RenderInput<'a> {
 	pub embedding: ImageEmbedding<'a>,
 	pub images: &'a mut ImageCache,
 	pub highlight_code: &'a mut dyn FnMut(&str, &str) -> Vec<HighlightedSpan>,
+	/// `None` shows Mermaid blocks as code.
+	pub diagrams: Option<&'a mut DiagramRenderer>,
 	/// For relative links in the browsers.
 	pub base_url: String,
 }
@@ -263,6 +292,10 @@ impl Engine {
 		match self {
 			Engine::WebView(engine) => {
 				let css_animations = engine.is_edge_html;
+				let is_dark = engine.is_dark;
+				let mut render_diagram = input.diagrams.as_deref_mut().map(|diagrams| {
+					move |code: &str, output| diagrams.render(code, is_dark, output)
+				});
 				let mut replace_image_source = |_: ImageSyntax, source: &str| {
 					let uri = input.images.data_uri(&input.embedding, source, css_animations);
 					uri.map(|uri| uri.to_string())
@@ -275,13 +308,18 @@ impl Engine {
 						highlight_code: input.highlight_code,
 						annotates_source_lines: true,
 						is_dark: engine.is_dark,
+						render_diagram: render_diagram.as_mut().map(|render| render as _),
 					},
 				);
 				engine.base_url = input.base_url.clone();
 				engine.push_content();
 			}
 			Engine::RichEdit(engine) => {
-				let mut load_image = |source: &str| input.images.load(&input.embedding, source);
+				let mut load_image = |source: &str| input.images.picture(&input.embedding, source);
+				let is_dark = engine.is_dark;
+				let mut render_diagram = input.diagrams.as_deref_mut().map(|diagrams| {
+					move |code: &str, output| diagrams.render(code, is_dark, output)
+				});
 				engine.document = render_rtf(
 					input.markdown,
 					&mut RtfOptions {
@@ -290,6 +328,7 @@ impl Engine {
 						pixels_per_inch: engine.control.dpi(),
 						load_image: &mut load_image,
 						highlight_code: input.highlight_code,
+						render_diagram: render_diagram.as_mut().map(|render| render as _),
 					},
 				);
 				// Notepad++'s dark mode theming may have set its own background.

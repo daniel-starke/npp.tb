@@ -12,7 +12,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::ffi::{
-	DarkModeColors, DockedWidgetData, NppData, ToolbarIconsWithDarkMode, dark_mode_flags,
+	DarkModeColors, DockedWidgetData, NppData, ToolbarIconsWithDarkMode, dark_mode_flags, language,
 	menu_command, modeless_dialog, npp_message, toolbar_icon_set,
 };
 use crate::scintilla::Scintilla;
@@ -64,6 +64,14 @@ impl Notepad {
 			1 => self.handles.scintilla_second_handle,
 			_ => self.handles.scintilla_main_handle,
 		})
+	}
+
+	/// The editors of the main and the second view.
+	pub fn editors(&self) -> [Scintilla; 2] {
+		[
+			Scintilla::new(self.handles.scintilla_main_handle),
+			Scintilla::new(self.handles.scintilla_second_handle),
+		]
 	}
 
 	/// Whether `window` is one of the two editors of the main window, e.g. the sender of a
@@ -130,6 +138,49 @@ impl Notepad {
 	/// Opens a new, empty document and makes it the active one.
 	pub fn new_document(&self) {
 		self.send_message(npp_message::MENU_COMMAND, 0, menu_command::FILE_NEW as LPARAM);
+	}
+
+	/// Name of the active document's language in `langs.xml` and `stylers.xml`, e.g. `cpp` or
+	/// `udf` for user defined languages. `None` if Notepad++ reports an unknown language.
+	pub fn current_language_name(&self) -> Option<String> {
+		let mut language_type: i32 = 0;
+		self.send_message(npp_message::GET_CURRENT_LANG_TYPE, 0, &raw mut language_type as LPARAM);
+		let language_type = u32::try_from(language_type).ok()?;
+		if language_type as isize >= language::EXTERNAL {
+			return Some(self.language_name(language_type as isize));
+		}
+		language::LANGS_XML_NAMES
+			.iter()
+			.find(|(value, _)| *value == language_type)
+			.map(|(_, name)| (*name).to_owned())
+	}
+
+	/// The language type of the active document, see [`crate::ffi::language`].
+	pub fn current_language(&self) -> isize {
+		let mut language_type: i32 = 0;
+		self.send_message(npp_message::GET_CURRENT_LANG_TYPE, 0, &raw mut language_type as LPARAM);
+		language_type as isize
+	}
+
+	/// The language type Notepad++ gave the external lexer named `name`, if it has one.
+	pub fn external_language(&self, name: &str) -> Option<isize> {
+		(language::EXTERNAL..language::EXTERNAL + language::MAX_EXTERNAL_LANGUAGES)
+			.find(|&language_type| self.language_name(language_type) == name)
+	}
+
+	/// `NPPM_GETLANGUAGENAME`: the name of an external lexer, the short `langs.xml` name of a
+	/// built-in language, and for [`language::USER`] `udf - <name>` with the name of the active
+	/// document's user defined language. Empty for unknown languages.
+	pub fn language_name(&self, language_type: isize) -> String {
+		let length = self.send_message(npp_message::GET_LANGUAGE_NAME, language_type as WPARAM, 0);
+		let Ok(length) = usize::try_from(length) else { return String::new() };
+		let mut buffer = vec![0u16; length + 1];
+		self.send_message(
+			npp_message::GET_LANGUAGE_NAME,
+			language_type as WPARAM,
+			buffer.as_mut_ptr() as LPARAM,
+		);
+		from_wide_until_null(&buffer)
 	}
 
 	/// Sets the language of the active document, see [`crate::ffi::language`].

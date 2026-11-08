@@ -146,6 +146,15 @@ pub fn code_language(info_language: &str) -> Option<CodeLanguage> {
 	})
 }
 
+/// The code block info string that [`code_language`] maps to the Notepad++ language
+/// `notepad_name` (`langs.xml` name, e.g. `javascript.js`).
+pub fn info_language_of(notepad_name: &str) -> Option<&'static str> {
+	LANGUAGES
+		.iter()
+		.find(|(_, language)| language.notepad_name.eq_ignore_ascii_case(notepad_name))
+		.and_then(|(aliases, _)| aliases.first().copied())
+}
+
 /// The keyword set index Notepad++ passes a `langs.xml` keyword list to (`SCI_SETKEYWORDS`).
 pub fn keyword_set_index(sets: KeywordSets, list_name: &str) -> Option<usize> {
 	let index = match list_name {
@@ -169,6 +178,86 @@ pub fn keyword_set_index(sets: KeywordSets, list_name: &str) -> Option<usize> {
 			_ => None,
 		},
 	}
+}
+
+/// The languages whose keywords the HTML lexer uses for embedded scripts, with their
+/// keyword set index.
+const HTML_KEYWORD_SOURCES: [(usize, &str); 3] = [(0, "html"), (1, "javascript"), (4, "php")];
+
+/// The keyword sets Notepad++ passes to the lexer of `language` (`SCI_SETKEYWORDS`): the lists
+/// of `langs.xml` and the keywords the user added to `styles` in the Style Configurator.
+pub fn keyword_sets(
+	language: &CodeLanguage,
+	langs_xml: &str,
+	styles: &[StylerEntry],
+) -> Vec<(usize, String)> {
+	let mut keyword_sets: Vec<(usize, String)> = Vec::new();
+	if language.keyword_sets == KeywordSets::Html {
+		for (set, notepad_name) in HTML_KEYWORD_SOURCES {
+			let keywords = language_keywords(langs_xml, notepad_name);
+			if let Some((_, keywords)) = keywords.into_iter().find(|(list, _)| list == "instre1") {
+				keyword_sets.push((set, keywords));
+			}
+		}
+	} else {
+		for (list, keywords) in language_keywords(langs_xml, language.notepad_name) {
+			if let Some(set) = keyword_set_index(language.keyword_sets, &list) {
+				keyword_sets.push((set, keywords));
+			}
+		}
+	}
+	for style in styles {
+		let Some(list) = &style.keyword_list else { continue };
+		let Some(set) = keyword_set_index(language.keyword_sets, list) else { continue };
+		if style.extra_keywords.trim().is_empty() {
+			continue;
+		}
+		match keyword_sets.iter_mut().find(|(existing, _)| *existing == set) {
+			Some((_, keywords)) => {
+				keywords.push(' ');
+				keywords.push_str(&style.extra_keywords);
+			}
+			None => keyword_sets.push((set, style.extra_keywords.clone())),
+		}
+	}
+	keyword_sets
+}
+
+/// The `stylers.xml` lexers whose styles a language's lexer uses: the HTML lexer also styles
+/// embedded JavaScript and PHP, which Notepad++ configures as languages of their own.
+pub fn styler_names(language: &CodeLanguage) -> Vec<&'static str> {
+	let mut names = vec![language.notepad_name];
+	if language.keyword_sets == KeywordSets::Html {
+		for name in ["html", "javascript.embedded", "php"] {
+			if !names.contains(&name) {
+				names.push(name);
+			}
+		}
+	}
+	names
+}
+
+/// The theme file Notepad++ uses, from the `DarkMode` settings of its `config.xml`: the name of
+/// a file in its `themes` directory, or `None` for `stylers.xml`.
+pub fn theme_file_name(config_xml: &str, is_dark_mode: bool) -> Option<String> {
+	const DEFAULT_DARK_THEME: &str = "DarkModeDefault.xml";
+	let dark_mode_settings = XmlItems::new(config_xml).find_map(|item| match item {
+		XmlItem::Start { name: "GUIConfig", attributes, .. }
+			if attribute(attributes, "name").as_deref() == Some("DarkMode") =>
+		{
+			Some(attributes)
+		}
+		_ => None,
+	});
+	let name = match (dark_mode_settings, is_dark_mode) {
+		(Some(attributes), true) => attribute(attributes, "darkThemeName")
+			.filter(|name| !name.is_empty())
+			.unwrap_or_else(|| DEFAULT_DARK_THEME.to_owned()),
+		(Some(attributes), false) => attribute(attributes, "lightThemeName").unwrap_or_default(),
+		(None, true) => DEFAULT_DARK_THEME.to_owned(),
+		(None, false) => String::new(),
+	};
+	Some(name).filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("stylers.xml"))
 }
 
 /// The GitHub token kind for a lexer style, from its Lexilla tags (`SCI_TAGSOFSTYLE`, e.g.
@@ -277,7 +366,7 @@ pub fn language_keywords(langs_xml: &str, notepad_name: &str) -> Vec<(String, St
 	keywords
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StylerEntry {
 	pub style_id: u8,
 	pub name: String,
@@ -285,7 +374,14 @@ pub struct StylerEntry {
 	pub keyword_list: Option<String>,
 	/// User defined keywords added to that list.
 	pub extra_keywords: String,
+	/// The text color (`0xRRGGBB`), unless the style takes the default one (`colorStyle`).
+	pub color: Option<u32>,
+	/// `fontStyle`: 1 bold, 2 italic, 4 underlined.
+	pub font_style: u8,
 }
+
+/// Notepad++'s `COLORSTYLE_FOREGROUND` bit of `colorStyle`.
+const COLOR_STYLE_FOREGROUND: u32 = 1;
 
 /// The styles of a language's lexer in Notepad++'s `stylers.xml`.
 pub fn lexer_styles(stylers_xml: &str, notepad_name: &str) -> Vec<StylerEntry> {
@@ -301,11 +397,21 @@ pub fn lexer_styles(stylers_xml: &str, notepad_name: &str) -> Vec<StylerEntry> {
 			XmlItem::Start { name: "WordsStyle", attributes, is_empty } if is_in_lexer => {
 				let style_id = attribute(attributes, "styleID").and_then(|id| id.parse().ok());
 				let Some(style_id) = style_id else { continue };
+				let color_style =
+					attribute(attributes, "colorStyle").and_then(|bits| bits.parse().ok());
+				let has_color =
+					color_style.is_none_or(|bits: u32| bits & COLOR_STYLE_FOREGROUND != 0);
 				let entry = StylerEntry {
 					style_id,
 					name: attribute(attributes, "name").unwrap_or_default(),
 					keyword_list: attribute(attributes, "keywordClass"),
 					extra_keywords: String::new(),
+					color: attribute(attributes, "fgColor")
+						.and_then(|color| u32::from_str_radix(color.trim(), 16).ok())
+						.filter(|_| has_color),
+					font_style: attribute(attributes, "fontStyle")
+						.and_then(|bits| bits.trim().parse().ok())
+						.unwrap_or(0),
 				};
 				if is_empty {
 					styles.push(entry);
@@ -445,6 +551,17 @@ mod tests {
 	}
 
 	#[test]
+	fn finds_info_languages_of_notepad_languages() {
+		assert_eq!(info_language_of("javascript.js"), Some("js"));
+		assert_eq!(info_language_of("props"), Some("properties"));
+		assert_eq!(info_language_of("normal"), None);
+		for (_, language) in LANGUAGES {
+			let info_language = info_language_of(language.notepad_name).expect("info language");
+			assert_eq!(code_language(info_language), Some(*language), "{}", language.notepad_name);
+		}
+	}
+
+	#[test]
 	fn aliases_are_unique() {
 		let mut aliases: Vec<&str> =
 			LANGUAGES.iter().flat_map(|(aliases, _)| aliases.iter().copied()).collect();
@@ -539,7 +656,7 @@ mod tests {
 		let stylers = r#"<NotepadPlus><LexerStyles>
 	<LexerType name="cpp" desc="C++" ext="">
 		<WordsStyle name="PREPROCESSOR" styleID="9" fgColor="804000" />
-		<WordsStyle name="INSTRUCTION WORD" styleID="5" keywordClass="instre1">my_keyword</WordsStyle>
+		<WordsStyle name="INSTRUCTION WORD" styleID="5" fgColor="0000FF" colorStyle="2" fontStyle="1" keywordClass="instre1">my_keyword</WordsStyle>
 		<WordsStyle name="BROKEN" styleID="x" />
 	</LexerType>
 	<LexerType name="c"><WordsStyle name="OTHER" styleID="1" /></LexerType>
@@ -550,17 +667,55 @@ mod tests {
 				StylerEntry {
 					style_id: 9,
 					name: "PREPROCESSOR".to_owned(),
-					keyword_list: None,
-					extra_keywords: String::new()
+					color: Some(0x804000),
+					..StylerEntry::default()
 				},
 				StylerEntry {
 					style_id: 5,
 					name: "INSTRUCTION WORD".to_owned(),
 					keyword_list: Some("instre1".to_owned()),
-					extra_keywords: "my_keyword".to_owned()
+					extra_keywords: "my_keyword".to_owned(),
+					font_style: 1,
+					..StylerEntry::default()
 				},
 			]
 		);
+	}
+
+	#[test]
+	fn combines_keywords_of_langs_xml_and_the_style_configurator() {
+		let langs = r#"<Language name="rust"><Keywords name="instre1">fn</Keywords><Keywords name="type1">u8</Keywords></Language>
+<Language name="html"><Keywords name="instre1">div</Keywords></Language>
+<Language name="javascript"><Keywords name="instre1">var</Keywords></Language>"#;
+		let user_keywords = StylerEntry {
+			keyword_list: Some("instre1".to_owned()),
+			extra_keywords: "my".to_owned(),
+			..StylerEntry::default()
+		};
+		let rust = code_language("rust").expect("rust");
+		assert_eq!(
+			keyword_sets(&rust, langs, &[user_keywords]),
+			[(0, "fn my".to_owned()), (2, "u8".to_owned())]
+		);
+		let html = code_language("html").expect("html");
+		assert_eq!(keyword_sets(&html, langs, &[]), [(0, "div".to_owned()), (1, "var".to_owned())]);
+		assert_eq!(styler_names(&html), ["html", "javascript.embedded", "php"]);
+		assert_eq!(styler_names(&rust), ["rust"]);
+	}
+
+	#[test]
+	fn finds_the_theme_of_the_mode() {
+		let config = r#"<NotepadPlus><GUIConfigs>
+	<GUIConfig name="DarkMode" enable="yes" darkThemeName="Monokai.xml" lightThemeName="" />
+</GUIConfigs></NotepadPlus>"#;
+		assert_eq!(theme_file_name(config, true).as_deref(), Some("Monokai.xml"));
+		assert_eq!(theme_file_name(config, false), None);
+		let config = r#"<GUIConfig name="DarkMode" darkThemeName="" lightThemeName="Solarized-light.xml" />"#;
+		assert_eq!(theme_file_name(config, true).as_deref(), Some("DarkModeDefault.xml"));
+		assert_eq!(theme_file_name(config, false).as_deref(), Some("Solarized-light.xml"));
+		assert_eq!(theme_file_name("", false), None);
+		let stylers = r#"<GUIConfig name="DarkMode" lightThemeName="stylers.xml"/>"#;
+		assert_eq!(theme_file_name(stylers, false), None);
 	}
 
 	#[test]

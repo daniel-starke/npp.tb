@@ -19,6 +19,7 @@ use crate::markdown_html::raw_html::{HtmlPart, plain_text_parts};
 use crate::markdown_html::{
 	AlertKind, HighlightedSpan, TokenKind, parser_options, source_lines_of_offsets,
 };
+use crate::mermaid::{Image, Output, PngImage, RenderDiagram};
 
 pub type Rgb = [u8; 3];
 
@@ -126,6 +127,8 @@ pub struct RtfOptions<'a> {
 	pub load_image: &'a mut dyn FnMut(&str) -> Option<Rc<EmbeddedImage>>,
 	/// Colored tokens of a code block, see [`crate::markdown_html::RenderOptions`].
 	pub highlight_code: &'a mut dyn FnMut(&str, &str) -> Vec<HighlightedSpan>,
+	/// Renders Mermaid blocks, see [`crate::markdown_html::RenderOptions`].
+	pub render_diagram: Option<&'a mut RenderDiagram<'a>>,
 }
 
 /// A block starting at a source line.
@@ -859,6 +862,22 @@ impl<'events, 'input, 'options, 'callbacks> RtfWriter<'events, 'input, 'options,
 		if code.ends_with('\n') {
 			code.pop();
 		}
+		if language.eq_ignore_ascii_case("mermaid")
+			&& let Some(render_diagram) = self.options.render_diagram.as_mut()
+		{
+			// Rendered for the DPI of the view, so that RichEdit does not need to scale it.
+			let scale = self.options.pixels_per_inch as f32 / 96.0;
+			match render_diagram(&code, Output::Png { scale }) {
+				Ok(Image::Png(png)) => return self.diagram(index, &png),
+				Ok(Image::Svg(_)) => {}
+				Err(error) => {
+					let muted = self.color(self.options.theme.muted);
+					self.begin_paragraph(index, &format!("\\i\\cf{muted}"));
+					self.push_text(&format!("Unable to render Mermaid diagram: {error}"));
+					self.end_paragraph();
+				}
+			}
+		}
 		let spans = match language.is_empty() {
 			true => Vec::new(),
 			false => (self.options.highlight_code)(&language, &code),
@@ -931,6 +950,25 @@ impl<'events, 'input, 'options, 'callbacks> RtfWriter<'events, 'input, 'options,
 		};
 		let goal_size = (scale(natural_width), scale(height.saturating_mul(TWIPS_PER_PIXEL)));
 		self.push_picture(format, (width, height), goal_size, bytes);
+	}
+
+	/// The diagram as centered picture, scaled down to the page width.
+	fn diagram(&mut self, index: usize, png: &PngImage) {
+		let available =
+			self.options.page_width.saturating_sub(self.left_indent()).max(MINIMUM_WIDTH);
+		let natural_width = png.width.saturating_mul(TWIPS_PER_PIXEL);
+		let natural_height = png.height.saturating_mul(TWIPS_PER_PIXEL);
+		let goal_size = match natural_width > available {
+			true => (
+				available,
+				(u64::from(natural_height) * u64::from(available) / u64::from(natural_width.max(1)))
+					as u32,
+			),
+			false => (natural_width, natural_height),
+		};
+		self.begin_paragraph(index, "\\qc");
+		self.push_picture("\\pngblip", (png.width, png.height), goal_size, &png.bytes);
+		self.end_paragraph();
 	}
 
 	/// The Octicon of an alert title in `color`, followed by a space. It is rendered for the DPI

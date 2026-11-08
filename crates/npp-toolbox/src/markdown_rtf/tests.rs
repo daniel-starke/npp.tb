@@ -1,4 +1,5 @@
 use super::*;
+use crate::mermaid::{Image, Output, PngImage};
 
 pub(crate) fn render(markdown: &str) -> RtfDocument {
 	render_at_dpi(markdown, 96)
@@ -29,6 +30,7 @@ fn render_at_dpi(markdown: &str, pixels_per_inch: u32) -> RtfDocument {
 			pixels_per_inch,
 			load_image: &mut load_image,
 			highlight_code: &mut highlight_code,
+			render_diagram: None,
 		},
 	)
 }
@@ -180,4 +182,42 @@ fn shares_narrow_table_widths_by_minimum_and_need() {
 	assert_eq!(column_widths(&[100, 200], &[50, 50], 200), [75, 125]);
 	assert_eq!(column_widths(&[100, 200], &[100, 300], 200), [50, 150]);
 	assert!(column_widths(&[], &[], 0).is_empty());
+}
+
+#[test]
+fn renders_mermaid_blocks_as_pictures() {
+	let mut load_image = |_: &str| None;
+	let mut highlight_code = |_: &str, _: &str| Vec::new();
+	let mut render_diagram = |code: &str, output: Output| match (code, output) {
+		("broken", _) => Err(crate::mermaid::Error::at(2, "bad")),
+		(_, Output::Png { scale }) => {
+			assert_eq!(scale, 2.0);
+			Ok(Image::Png(Rc::new(PngImage {
+				bytes: vec![0xAB],
+				width: 20,
+				height: 10,
+				pixel_width: 40,
+				pixel_height: 20,
+			})))
+		}
+		(_, Output::Svg) => unreachable!("RichEdit shows pictures"),
+	};
+	let document = render_rtf(
+		"```mermaid\npie\n```\n\n```mermaid\nbroken\n```\n",
+		&mut RtfOptions {
+			theme: &LIGHT_THEME,
+			page_width: 6000,
+			pixels_per_inch: 192,
+			load_image: &mut load_image,
+			highlight_code: &mut highlight_code,
+			render_diagram: Some(&mut render_diagram),
+		},
+	);
+	// Rendered at twice the size for 192 DPI, shown at the natural size of 20 x 10 pixels.
+	assert!(document.rtf.contains("\\qc"));
+	assert!(
+		document.rtf.contains("{\\pict\\pngblip\\picw529\\pich264\\picwgoal300\\pichgoal150\nab}")
+	);
+	assert!(document.rtf.contains("Unable to render Mermaid diagram: line 2: bad"));
+	assert!(document.rtf.contains("broken"));
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::mermaid::{self, Diagram, Image, Output, PngImage};
 
 fn render_with(markdown: &str, styling: Styling) -> String {
 	render_with_lines(markdown, styling, false)
@@ -23,6 +24,7 @@ fn render_with_lines(markdown: &str, styling: Styling, annotates_source_lines: b
 		styling,
 		replace_image_source: &mut replace_image_source,
 		highlight_code: &mut highlight_code,
+		render_diagram: None,
 	};
 	render_markdown(markdown, &mut options)
 }
@@ -146,6 +148,7 @@ fn colors_alert_icons_for_the_theme() {
 				styling,
 				replace_image_source: &mut replace_image_source,
 				highlight_code: &mut highlight_code,
+				render_diagram: None,
 				annotates_source_lines: false,
 				is_dark,
 			},
@@ -332,7 +335,35 @@ fn renders_random_input_without_panicking() {
 
 #[test]
 fn renders_random_math_without_panicking() {
-	const FRAGMENTS: [&str; 60] = [
+	const FRAGMENTS: [&str; 88] = [
+		"#",
+		"@",
+		"*",
+		"\\def",
+		"\\gdef",
+		"\\global",
+		"\\newcommand",
+		"\\renewcommand",
+		"\\providecommand",
+		"\\a",
+		"[1]",
+		"\\tag",
+		"\\label",
+		"\\ref",
+		"\\eqref",
+		"\\nonumber",
+		"\\href",
+		"\\genfrac",
+		"\\substack",
+		"\\above",
+		"\\smash",
+		"\\rule",
+		"\\llap",
+		"\\colorbox",
+		"\\begin{CD}",
+		"\\end{CD}",
+		"\\begin{align}",
+		"\\end{align}",
 		"\\",
 		"\\\\",
 		"{",
@@ -411,8 +442,12 @@ fn renders_random_math_without_panicking() {
 			.map(|_| FRAGMENTS[(next_random() % FRAGMENTS.len() as u64) as usize])
 			.collect();
 		let mut output = String::new();
-		math::push_math(&mut output, &latex, next_random() % 2 == 0);
+		let mut equations = math_equations::Equations::new(next_random() % 2 == 0);
+		math::push_math(&mut output, &latex, next_random() % 2 == 0, &mut equations);
+		equations.resolve_references(&mut output);
 		assert!(output.ends_with("</math>"));
+		// The same formula as a diagram label does, which rejects what it does not know.
+		let _ = math::latex_to_mathml(&latex);
 	}
 }
 
@@ -434,4 +469,80 @@ fn annotates_blocks_with_source_lines() {
 		assert!(html.contains(expected), "{expected} missing in {html}");
 	}
 	assert!(!render("para").contains("data-line"));
+}
+
+fn render_diagrams(markdown: &str, styling: Styling, is_enabled: bool) -> String {
+	let mut replace_image_source = |_: ImageSyntax, _: &str| None;
+	let mut highlight_code = |_: &str, _: &str| Vec::new();
+	let mut render_diagram = |code: &str, output: Output| match (code, output) {
+		("broken", _) => Err(mermaid::Error::at(1, "bad <syntax>")),
+		(_, Output::Svg) => Ok(Image::Svg(std::rc::Rc::new(Diagram {
+			svg: r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>"#.to_owned(),
+			width: 20.0,
+			height: 10.0,
+			texts: Vec::new(),
+		}))),
+		(_, Output::Png { scale }) => {
+			assert_eq!(scale, 2.0);
+			Ok(Image::Png(std::rc::Rc::new(PngImage {
+				bytes: b"png".to_vec(),
+				width: 20,
+				height: 10,
+				pixel_width: 40,
+				pixel_height: 20,
+			})))
+		}
+	};
+	render_markdown(
+		markdown,
+		&mut RenderOptions {
+			styling,
+			replace_image_source: &mut replace_image_source,
+			highlight_code: &mut highlight_code,
+			render_diagram: is_enabled.then_some(&mut render_diagram as _),
+			annotates_source_lines: true,
+			is_dark: false,
+		},
+	)
+}
+
+#[test]
+fn renders_mermaid_blocks() {
+	let html = render_diagrams("```mermaid\npie\n```\n", Styling::StyleSheet, true);
+	assert_eq!(
+		html,
+		"<div style=\"margin-bottom:16px;text-align:center\" data-line=\"0\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"10\"/></div>\n"
+	);
+	// Office applications drop inline SVG, so the clipboard gets a PNG picture.
+	let html = render_diagrams("```mermaid\npie\n```\n", Styling::Inline, true);
+	assert!(html.contains("<img style=\""));
+	assert!(html.contains("src=\"data:image/png;base64,cG5n\""));
+	assert!(html.contains(" width=\"20\" height=\"10\" alt=\"Mermaid diagram\">"));
+	let html = render_diagrams("```mermaid\npie\n```\n", Styling::StyleSheet, false);
+	assert!(html.starts_with("<pre"));
+}
+
+#[test]
+fn shows_mermaid_errors_above_the_code() {
+	let html = render_diagrams("```mermaid\nbroken\n```\n", Styling::StyleSheet, true);
+	assert!(html.starts_with("<p style=\"margin-bottom:8px;"));
+	assert!(
+		html.contains(">Unable to render Mermaid diagram: line 1: bad &lt;syntax&gt;</p>\n<pre")
+	);
+	assert!(html.contains("<code>broken</code></pre>"));
+}
+
+#[test]
+fn renders_code_as_fenced_code_block() {
+	assert_eq!(fenced_code_block("", "rust"), "```rust\n```\n");
+	assert_eq!(fenced_code_block("a\r\n", ""), "```\na\r\n```\n");
+	assert_eq!(fenced_code_block("x = `a` ```` b", "py"), "`````py\nx = `a` ```` b\n`````\n");
+	assert_eq!(
+		render(&fenced_code_block("fn main() {}\n```\n# <b>", "rust")),
+		"<pre><code><span class=\"pl-k\">fn</span> main() {}\n```\n# &lt;b&gt;</code></pre>\n"
+	);
+	assert_eq!(
+		render(&fenced_code_block("    indented\n\n\ttab", "")),
+		"<pre><code>    indented\n\n\ttab</code></pre>\n"
+	);
 }

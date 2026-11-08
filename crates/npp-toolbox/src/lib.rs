@@ -8,14 +8,25 @@
 mod base64;
 mod clipboard_html;
 mod code_highlight;
+mod comment_selection;
+#[cfg(windows)]
+mod editor_lexer;
 mod emoji;
 mod emoji_table;
 mod image_embedding;
 #[cfg(windows)]
 mod lexer_highlighter;
 mod markdown_html;
+mod markdown_lexer;
 mod markdown_rtf;
 mod markdown_table;
+mod mermaid;
+#[cfg(windows)]
+mod mermaid_clock;
+#[cfg(windows)]
+mod mermaid_image;
+#[cfg(windows)]
+mod mermaid_text;
 mod rewrap;
 mod settings;
 mod svg_animation;
@@ -49,10 +60,22 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 			toolbar_icon: Some(&toolbar_icons::MARKDOWN_TABLE),
 		}),
 		MenuEntry::Command(Command {
+			menu_name: "Compact Markdown Table",
+			run: commands::compact_markdown_table,
+			shortcut: Some(Shortcut::ctrl_alt(b'P')),
+			toolbar_icon: Some(&toolbar_icons::COMPACT_MARKDOWN_TABLE),
+		}),
+		MenuEntry::Command(Command {
 			menu_name: "Rewrap...",
 			run: commands::rewrap,
 			shortcut: Some(Shortcut::ctrl_alt(b'W')),
 			toolbar_icon: Some(&toolbar_icons::REWRAP),
+		}),
+		MenuEntry::Command(Command {
+			menu_name: "Select Comments",
+			run: commands::select_comments,
+			shortcut: Some(Shortcut::ctrl_alt(b'N')),
+			toolbar_icon: Some(&toolbar_icons::SELECT_COMMENTS),
 		}),
 		MenuEntry::Separator,
 		MenuEntry::Command(Command {
@@ -89,6 +112,7 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 	],
 	on_notification: commands::on_notification,
 	shows_toolbar_icon: commands::shows_toolbar_icon,
+	lexers: editor_lexer::lexers,
 };
 
 #[cfg(windows)]

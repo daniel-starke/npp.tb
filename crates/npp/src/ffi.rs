@@ -7,7 +7,7 @@
 
 use crate::interface::{
 	docking as dock, docking_resource, menu_cmd_id, notepad_plus_msgs as npp, plugin_interface,
-	scintilla as sci,
+	scintilla as sci, scintilla_edit_view,
 };
 
 /// Notepad++ messages (`NPPM_*`) sent to the main Notepad++ window.
@@ -39,6 +39,11 @@ pub mod npp_message {
 	pub const GET_NPP_DIRECTORY: u32 = npp::NPPM_GETNPPDIRECTORY;
 	/// `lParam`: menu command ID such as [`super::menu_command::FILE_NEW`].
 	pub const MENU_COMMAND: u32 = npp::NPPM_MENUCOMMAND;
+	/// `lParam`: `*mut i32` receiving the [`super::language`] of the current document.
+	pub const GET_CURRENT_LANG_TYPE: u32 = npp::NPPM_GETCURRENTLANGTYPE;
+	/// `wParam`: [`super::language`], `lParam`: buffer or null to get the length in UTF-16 units
+	/// without NUL. The display name, or for external lexers their `langs.xml` name.
+	pub const GET_LANGUAGE_NAME: u32 = npp::NPPM_GETLANGUAGENAME;
 	/// `lParam`: [`super::language`] of the current document.
 	pub const SET_CURRENT_LANG_TYPE: u32 = npp::NPPM_SETCURRENTLANGTYPE;
 	/// `lParam`: NUL terminated UTF-16 path. Opens the file or switches to it.
@@ -74,7 +79,18 @@ pub mod menu_command {
 pub mod language {
 	use super::npp::lang_type;
 
+	pub const TEXT: isize = lang_type::L_TEXT as isize;
 	pub const HTML: isize = lang_type::L_HTML as isize;
+	/// A user defined language.
+	pub const USER: isize = lang_type::L_USER as isize;
+	/// The first external lexer. Later values are further external lexers.
+	pub const EXTERNAL: isize = lang_type::L_EXTERNAL as isize;
+	/// `NB_MAX_EXTERNAL_LANG` of Notepad++'s `NppConstants.h`, which the interface generator
+	/// does not read (a C++ `constexpr`).
+	pub const MAX_EXTERNAL_LANGUAGES: isize = 30;
+
+	/// Each built-in language with its name in `langs.xml` and `stylers.xml`.
+	pub const LANGS_XML_NAMES: &[(u32, &str)] = &super::scintilla_edit_view::LANGUAGE_NAMES;
 }
 
 /// Actions of [`npp_message::MODELESS_DIALOG`].
@@ -111,6 +127,12 @@ pub mod npp_notification {
 	/// Another document became the active one, also when switching views.
 	pub const BUFFER_ACTIVATED: u32 = npp::NPPN_BUFFERACTIVATED;
 	pub const DARK_MODE_CHANGED: u32 = npp::NPPN_DARKMODECHANGED;
+	/// The language of the active document changed.
+	pub const LANGUAGE_CHANGED: u32 = npp::NPPN_LANGCHANGED;
+	/// A document was closed; `idFrom` is its buffer ID.
+	pub const FILE_CLOSED: u32 = npp::NPPN_FILECLOSED;
+	/// The user changed styles in the Style Configurator.
+	pub const WORD_STYLES_UPDATED: u32 = npp::NPPN_WORDSTYLESUPDATED;
 }
 
 /// Scintilla notification codes (`SCN_*`) passed to `beNotified` with the editor as sender.
@@ -176,6 +198,33 @@ pub mod scintilla_message {
 	pub const GET_STYLED_TEXT_FULL: u32 = sci::SCI_GETSTYLEDTEXTFULL;
 	/// `wParam`: style, `lParam`: buffer or null to get the length. Space separated tags.
 	pub const TAGS_OF_STYLE: u32 = sci::SCI_TAGSOFSTYLE;
+	/// `lParam`: buffer or null to get the length. The Lexilla name of the lexer, e.g. `cpp`.
+	pub const GET_LEXER_LANGUAGE: u32 = sci::SCI_GETLEXERLANGUAGE;
+	/// `wParam`: caret, `lParam`: anchor. Replaces all selections by one.
+	pub const SET_SELECTION: u32 = sci::SCI_SETSELECTION;
+	/// `wParam`: caret, `lParam`: anchor. Adds a selection and makes it the main one.
+	pub const ADD_SELECTION: u32 = sci::SCI_ADDSELECTION;
+	/// `wParam`: index of the selection.
+	pub const SET_MAIN_SELECTION: u32 = sci::SCI_SETMAINSELECTION;
+	pub const SCROLL_CARET: u32 = sci::SCI_SCROLLCARET;
+	/// `wParam`: style, `lParam`: color as `0xBBGGRR`.
+	pub const STYLE_SET_FORE: u32 = sci::SCI_STYLESETFORE;
+	pub const STYLE_SET_BACK: u32 = sci::SCI_STYLESETBACK;
+	pub const STYLE_GET_FORE: u32 = sci::SCI_STYLEGETFORE;
+	pub const STYLE_GET_BACK: u32 = sci::SCI_STYLEGETBACK;
+	/// `wParam`: style, `lParam`: boolean.
+	pub const STYLE_SET_BOLD: u32 = sci::SCI_STYLESETBOLD;
+	pub const STYLE_SET_ITALIC: u32 = sci::SCI_STYLESETITALIC;
+	pub const STYLE_SET_UNDERLINE: u32 = sci::SCI_STYLESETUNDERLINE;
+	/// Fills the rest of the line after the last character of the style with its background.
+	pub const STYLE_SET_EOL_FILLED: u32 = sci::SCI_STYLESETEOLFILLED;
+	/// `wParam`: style, `lParam`: NUL terminated font name (UTF-8).
+	pub const STYLE_SET_FONT: u32 = sci::SCI_STYLESETFONT;
+	/// `wParam`: style, `lParam`: buffer or null to get the length.
+	pub const STYLE_GET_FONT: u32 = sci::SCI_STYLEGETFONT;
+	/// Font size in hundredths of a point.
+	pub const STYLE_SET_SIZE_FRACTIONAL: u32 = sci::SCI_STYLESETSIZEFRACTIONAL;
+	pub const STYLE_GET_SIZE_FRACTIONAL: u32 = sci::SCI_STYLEGETSIZEFRACTIONAL;
 }
 
 /// Scintilla constants used as message arguments or results.

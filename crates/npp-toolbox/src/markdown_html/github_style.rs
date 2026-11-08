@@ -223,6 +223,13 @@ pub mod inline {
 	pub const RULE: &str = "box-sizing:content-box;overflow:hidden;height:0.25em;padding:0;margin:24px 0;background-color:#d1d9e0;border:0";
 	pub const LINK: &str = "color:#0969da;text-decoration:none";
 	pub const IMAGE: &str = "max-width:100%;box-sizing:content-box;border-style:none";
+	/// Mermaid diagrams are centered like on GitHub.
+	pub const DIAGRAM: &str = "margin-bottom:16px;text-align:center";
+	/// A muted note with the red border of the caution alert, light and dark.
+	pub const DIAGRAM_ERROR: &str =
+		"margin-bottom:8px;padding:4px 12px;color:#59636e;border-left:.25em solid #d1242f";
+	pub const DIAGRAM_ERROR_DARK: &str =
+		"margin-bottom:8px;padding:4px 12px;color:#9198a1;border-left:.25em solid #f85149";
 	pub const STRONG: &str = "font-weight:600";
 	pub const FOOTNOTES: &str = "font-size:12px;color:#59636e;border-top:1px solid #d1d9e0";
 	pub const FOOTNOTE_LIST: &str = "padding-left:16px";

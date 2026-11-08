@@ -5,7 +5,7 @@
 //! instead.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 struct Architecture {
@@ -36,17 +36,19 @@ const ARCHITECTURES: [Architecture; 2] = [
 
 const FALLBACK_GCC: &str = "gcc";
 
-/// Builds `NppToolBox.dll` for `architecture_name` (`x64` or `x86`) in release mode. Further
-/// `cargo_arguments` are passed to `cargo build`.
+pub const DLL_NAME: &str = "NppToolBox.dll";
+
+/// Builds `NppToolBox.dll` for `architecture_name` (`x64` or `x86`) in release mode and returns
+/// the release directory of its target. Further `cargo_arguments` are passed to `cargo build`.
 pub fn build(
 	workspace_root: &Path,
 	architecture_name: Option<&str>,
 	cargo_arguments: &[String],
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
 	let architecture = ARCHITECTURES
 		.iter()
 		.find(|architecture| Some(architecture.name) == architecture_name)
-		.ok_or_else(|| "build needs the architecture x64 or x86".to_owned())?;
+		.ok_or_else(|| "the architecture must be x64 or x86".to_owned())?;
 	let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 	let mut command = Command::new(cargo);
 	command
@@ -83,7 +85,12 @@ pub fn build(
 	}
 
 	let status = command.status().map_err(|error| format!("cannot run cargo: {error}"))?;
-	if status.success() { Ok(()) } else { Err(format!("cargo build failed ({status})")) }
+	if !status.success() {
+		return Err(format!("cargo build failed ({status})"));
+	}
+	let target_directory =
+		std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
+	Ok(workspace_root.join(target_directory).join(architecture.target).join("release"))
 }
 
 fn runs(program: &str) -> bool {

@@ -26,6 +26,7 @@ fn main() {
 		.expect("writable OUT_DIR");
 	}
 
+	npp_build::link_stdcall_exports();
 	if let Err(error) =
 		npp_build::link_resource_script(Path::new(RESOURCE_SCRIPT), &output_directory)
 	{

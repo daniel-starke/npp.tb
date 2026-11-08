@@ -140,7 +140,8 @@ fn percent_decode(text: &str) -> Option<String> {
 	String::from_utf8(bytes).ok()
 }
 
-/// Media type by file extension, only for formats browsers and Office display.
+/// Media type by file extension: formats browsers and Office display, and without the
+/// `pure-rust` feature formats that the RichEdit viewer converts with WIC codecs of Windows.
 fn media_type_of(path: &Path) -> Option<&'static str> {
 	let extension = path.extension()?.to_str()?.to_ascii_lowercase();
 	Some(match extension.as_str() {
@@ -152,6 +153,18 @@ fn media_type_of(path: &Path) -> Option<&'static str> {
 		"bmp" => "image/bmp",
 		"ico" => "image/x-icon",
 		"avif" => "image/avif",
+		#[cfg(not(feature = "pure-rust"))]
+		"tif" | "tiff" => "image/tiff",
+		#[cfg(not(feature = "pure-rust"))]
+		"jxl" => "image/jxl",
+		#[cfg(not(feature = "pure-rust"))]
+		"heic" => "image/heic",
+		#[cfg(not(feature = "pure-rust"))]
+		"heif" => "image/heif",
+		#[cfg(not(feature = "pure-rust"))]
+		"jxr" | "wdp" | "hdp" => "image/vnd.ms-photo",
+		#[cfg(not(feature = "pure-rust"))]
+		"dds" => "image/vnd-ms.dds",
 		_ => return None,
 	})
 }
@@ -220,6 +233,14 @@ mod tests {
 		] {
 			assert_eq!(embedding.data_uri(source), None, "{source}");
 		}
+	}
+
+	#[test]
+	fn knows_media_types_of_image_extensions() {
+		assert_eq!(media_type_of(Path::new("a.PNG")), Some("image/png"));
+		assert_eq!(media_type_of(Path::new("a.txt")), None);
+		let tiff = media_type_of(Path::new("scan.tiff"));
+		assert_eq!(tiff, cfg!(not(feature = "pure-rust")).then_some("image/tiff"));
 	}
 
 	#[test]

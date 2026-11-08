@@ -1,4 +1,4 @@
-//! Realignment of GitHub Flavored Markdown tables.
+//! Realignment and compaction of GitHub Flavored Markdown tables.
 //!
 //! Cells are split at unescaped `|` only. Like GFM, a pipe inside a code span still separates
 //! cells unless it is escaped as `\|`. Rows may be prefixed by indentation and blockquote markers,
@@ -9,7 +9,7 @@ use std::ops::Range;
 use crate::text_width::display_width;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct RealignedTable {
+pub struct FormattedTable {
 	/// Rows of the input block that belong to the table and are replaced by `lines`.
 	pub rows: Range<usize>,
 	pub lines: Vec<String>,
@@ -70,81 +70,128 @@ pub fn is_delimiter_row(content: &str) -> bool {
 		&& row.cells.iter().all(|cell| is_delimiter_cell(&content[cell.clone()]))
 }
 
-/// Realigns the table containing `caret_row` within `block`, a run of consecutive table-like
-/// lines sharing the same prefix. Lines before the header row are not part of the table.
-pub fn realign_table(block: &[&str], caret_row: usize) -> Result<RealignedTable, TableError> {
-	let prefix = row_prefix(block[caret_row]);
-	let parsed_rows: Vec<ParsedRow> =
-		block.iter().map(|line| parse_row(line, prefix.len())).collect();
-	let delimiter_index = (1..block.len())
-		.find(|&index| is_delimiter_row(&block[index][prefix.len()..]))
-		.ok_or(TableError::MissingDelimiterRow)?;
-	let header_index = delimiter_index - 1;
-	if caret_row < header_index {
-		return Err(TableError::CaretOutsideTable);
+/// The table found in a block of table-like lines, starting at its header row.
+struct Table<'block> {
+	prefix: &'block str,
+	header_index: usize,
+	lines: &'block [&'block str],
+	rows: Vec<ParsedRow>,
+	column_count: usize,
+	alignments: Vec<ColumnAlignment>,
+	needs_leading_pipe: bool,
+	needs_trailing_pipe: bool,
+}
+
+impl<'block> Table<'block> {
+	/// Finds the table containing `caret_row` within `block`, a run of consecutive table-like
+	/// lines sharing the same prefix. Lines before the header row are not part of the table.
+	fn find(block: &'block [&'block str], caret_row: usize) -> Result<Self, TableError> {
+		let prefix = row_prefix(block[caret_row]);
+		let delimiter_index = (1..block.len())
+			.find(|&index| is_delimiter_row(&block[index][prefix.len()..]))
+			.ok_or(TableError::MissingDelimiterRow)?;
+		let header_index = delimiter_index - 1;
+		if caret_row < header_index {
+			return Err(TableError::CaretOutsideTable);
+		}
+		let lines = &block[header_index..];
+		let rows: Vec<ParsedRow> = lines.iter().map(|line| parse_row(line, prefix.len())).collect();
+		let mut table = Table {
+			prefix,
+			header_index,
+			lines,
+			column_count: rows.iter().map(|row| row.cells.len()).max().unwrap_or(1).max(1),
+			rows,
+			alignments: Vec::new(),
+			needs_leading_pipe: false,
+			needs_trailing_pipe: false,
+		};
+		table.alignments = (0..table.column_count)
+			.map(|column| alignment_of(table.cell_text(1, column)))
+			.collect();
+		// A row without outer pipes cannot represent an empty first or last cell, and a single
+		// column table needs pipes to be recognized as a table at all.
+		let last_column = table.column_count - 1;
+		table.needs_leading_pipe = table.rows[0].has_leading_pipe
+			|| table.column_count == 1
+			|| (0..table.rows.len()).any(|row| table.cell_text(row, 0).is_empty());
+		table.needs_trailing_pipe = table.rows[0].has_trailing_pipe
+			|| table.column_count == 1
+			|| (0..table.rows.len()).any(|row| table.cell_text(row, last_column).is_empty());
+		Ok(table)
 	}
 
-	let table_lines = &block[header_index..];
-	let table_rows = &parsed_rows[header_index..];
-	let cell_text = |row: usize, column: usize| -> &str {
-		table_rows[row].cells.get(column).map_or("", |range| &table_lines[row][range.clone()])
-	};
-	let column_count = table_rows.iter().map(|row| row.cells.len()).max().unwrap_or(1).max(1);
-	let alignments: Vec<ColumnAlignment> =
-		(0..column_count).map(|column| alignment_of(cell_text(1, column))).collect();
-	// A row without outer pipes cannot represent an empty first or last cell, and a single
-	// column table needs pipes to be recognized as a table at all.
-	let needs_leading_pipe = table_rows[0].has_leading_pipe
-		|| column_count == 1
-		|| (0..table_rows.len()).any(|row| cell_text(row, 0).is_empty());
-	let needs_trailing_pipe = table_rows[0].has_trailing_pipe
-		|| column_count == 1
-		|| (0..table_rows.len()).any(|row| cell_text(row, column_count - 1).is_empty());
+	fn cell_text(&self, row: usize, column: usize) -> &'block str {
+		self.rows[row].cells.get(column).map_or("", |range| &self.lines[row][range.clone()])
+	}
 
+	/// Builds every row of the table from its cells, which already contain their padding.
+	fn reformat(&self, cell: impl Fn(usize, usize) -> String) -> FormattedTable {
+		let lines = (0..self.rows.len())
+			.map(|row| {
+				let cells: Vec<String> =
+					(0..self.column_count).map(|column| cell(row, column)).collect();
+				join_cells(self.prefix, &cells, self.needs_leading_pipe, self.needs_trailing_pipe)
+			})
+			.collect();
+		FormattedTable { rows: self.header_index..self.header_index + self.rows.len(), lines }
+	}
+}
+
+/// Realigns the table containing `caret_row` within `block`, a run of consecutive table-like
+/// lines sharing the same prefix. Lines before the header row are not part of the table.
+pub fn realign_table(block: &[&str], caret_row: usize) -> Result<FormattedTable, TableError> {
+	let table = Table::find(block, caret_row)?;
+	let column_count = table.column_count;
 	// Cells are padded by one space next to each pipe. Delimiter cells fill that padding with
 	// dashes too (`|:---|`), so they must be long enough for their colons plus one dash.
-	let padding_of = |column: usize| {
-		usize::from(column > 0 || needs_leading_pipe)
-			+ usize::from(column + 1 < column_count || needs_trailing_pipe)
-	};
+	let has_left_space = |column: usize| column > 0 || table.needs_leading_pipe;
+	let has_right_space = |column: usize| column + 1 < column_count || table.needs_trailing_pipe;
+	let padding_of =
+		|column: usize| usize::from(has_left_space(column)) + usize::from(has_right_space(column));
 	let widths: Vec<usize> = (0..column_count)
 		.map(|column| {
-			let delimiter_minimum = alignments[column].colon_count() + 1;
-			(0..table_rows.len())
+			let delimiter_minimum = table.alignments[column].colon_count() + 1;
+			(0..table.rows.len())
 				.filter(|&row| row != 1)
-				.map(|row| display_width(cell_text(row, column), 1))
+				.map(|row| display_width(table.cell_text(row, column), 1))
 				.fold(delimiter_minimum.saturating_sub(padding_of(column)).max(1), usize::max)
 		})
 		.collect();
 
-	let lines = (0..table_rows.len())
-		.map(|row| {
-			let cells: Vec<String> = (0..column_count)
-				.map(|column| {
-					let has_left_space = column > 0 || needs_leading_pipe;
-					let has_right_space = column + 1 < column_count || needs_trailing_pipe;
-					if row == 1 {
-						delimiter_cell(alignments[column], widths[column] + padding_of(column))
-					} else {
-						let text =
-							pad_cell(cell_text(row, column), widths[column], alignments[column]);
-						format!(
-							"{}{text}{}",
-							if has_left_space { " " } else { "" },
-							if has_right_space { " " } else { "" }
-						)
-					}
-				})
-				.collect();
-			join_cells(prefix, &cells, needs_leading_pipe, needs_trailing_pipe)
-		})
-		.collect();
-	Ok(RealignedTable { rows: header_index..block.len(), lines })
+	Ok(table.reformat(|row, column| {
+		let alignment = table.alignments[column];
+		if row == 1 {
+			delimiter_cell(alignment, widths[column] + padding_of(column))
+		} else {
+			let text = pad_cell(table.cell_text(row, column), widths[column], alignment);
+			format!(
+				"{}{text}{}",
+				if has_left_space(column) { " " } else { "" },
+				if has_right_space(column) { " " } else { "" }
+			)
+		}
+	}))
+}
+
+/// Compacts the table containing `caret_row` within `block` (see [`realign_table`]): removes
+/// all padding around the cell contents and shortens delimiter cells to their colons plus one
+/// dash. Missing cells are added and outer pipes kept or added like [`realign_table`] does.
+pub fn compact_table(block: &[&str], caret_row: usize) -> Result<FormattedTable, TableError> {
+	let table = Table::find(block, caret_row)?;
+	Ok(table.reformat(|row, column| {
+		let alignment = table.alignments[column];
+		if row == 1 {
+			delimiter_cell(alignment, alignment.colon_count() + 1)
+		} else {
+			table.cell_text(row, column).to_owned()
+		}
+	}))
 }
 
 /// Maps a caret (character offset) in an original row to the same cell and offset within the
-/// cell content of the realigned row.
-pub fn caret_column_after_realign(old_line: &str, old_column: usize, new_line: &str) -> usize {
+/// cell content of the reformatted row.
+pub fn caret_column_after_reformat(old_line: &str, old_column: usize, new_line: &str) -> usize {
 	let prefix_length = row_prefix(old_line).len();
 	let old_row = parse_row(old_line, prefix_length);
 	let new_row = parse_row(new_line, row_prefix(new_line).len());
@@ -356,13 +403,60 @@ mod tests {
 		assert_eq!(realign(&["a|b", ":-:|:-:", "c|d"]), ["a  | b", ":-:|:-:", "c  | d"]);
 	}
 
+	fn compact(block: &[&str]) -> Vec<String> {
+		compact_table(block, block.len() - 1).unwrap().lines
+	}
+
+	#[test]
+	fn compacts_cells_and_keeps_alignment_markers() {
+		let lines = compact(&[
+			"| Name  | Qty | Note |",
+			"|:------|----:|:----:|",
+			"| apple |   3 |  ok  |",
+			"| kiwi  |  12 | fine |",
+		]);
+		assert_eq!(lines, ["|Name|Qty|Note|", "|:-|-:|:-:|", "|apple|3|ok|", "|kiwi|12|fine|"]);
+	}
+
+	#[test]
+	fn compacts_tables_without_outer_pipes() {
+		assert_eq!(compact(&["a   | bb", "----|---", "ccc | d"]), ["a|bb", "-|-", "ccc|d"]);
+	}
+
+	#[test]
+	fn compacts_with_missing_and_empty_cells() {
+		assert_eq!(compact(&["a | b | c", "---|---|---", "x | y"]), ["a|b|c|", "-|-|-|", "x|y||"]);
+		assert_eq!(compact(&["| a |  |", "|---|---|", "|  | b |"]), ["|a||", "|-|-|", "||b|"]);
+	}
+
+	#[test]
+	fn compacts_with_prefix_escaped_pipes_and_single_column() {
+		assert_eq!(
+			compact(&["> | a \\| b | c |", "> |---|---|", "> | x | y |"]),
+			["> |a \\| b|c|", "> |-|-|", "> |x|y|"]
+		);
+		assert_eq!(compact(&["a |", "-|", "bcde |"]), ["|a|", "|-|", "|bcde|"]);
+	}
+
+	#[test]
+	fn compaction_undoes_realignment() {
+		let block = ["|Name|Qty|", "|:-|:-:|", "|apple|3|", "|kiwi|12|"];
+		let realigned = realign(&block);
+		let realigned: Vec<&str> = realigned.iter().map(String::as_str).collect();
+		assert_eq!(compact(&realigned), block);
+	}
+
 	#[test]
 	fn maps_caret_into_same_cell() {
 		let old_line = "|a|bc|";
 		let new_line = "| a   | bc  |";
 		// Caret between "b" and "c".
-		assert_eq!(caret_column_after_realign(old_line, 4, new_line), 9);
+		assert_eq!(caret_column_after_reformat(old_line, 4, new_line), 9);
 		// Caret right after the leading pipe.
-		assert_eq!(caret_column_after_realign(old_line, 1, new_line), 2);
+		assert_eq!(caret_column_after_reformat(old_line, 1, new_line), 2);
+		// Back from the realigned row: caret after "b" in "| a   | bc  |".
+		assert_eq!(caret_column_after_reformat(new_line, 9, old_line), 4);
+		// Caret in the padding behind "a" moves to the end of "a".
+		assert_eq!(caret_column_after_reformat(new_line, 4, old_line), 2);
 	}
 }

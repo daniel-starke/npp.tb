@@ -22,36 +22,31 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - run: cargo clippy --workspace --all-targets --target i686-pc-windows-gnu -- -D warnings
+      - run: cargo test --workspace --features npp-toolbox/pure-rust
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu --features npp-toolbox/pure-rust -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target i686-pc-windows-gnu --features npp-toolbox/pure-rust -- -D warnings
+      - run: cargo test -p npp-toolbox --no-default-features
+      - run: cargo clippy -p npp-toolbox --all-targets --target x86_64-pc-windows-gnu --no-default-features -- -D warnings
+      - run: cargo clippy -p npp-toolbox --all-targets --target i686-pc-windows-gnu --no-default-features -- -D warnings
 
-  build:
-    name: Build ${{ matrix.architecture }}
+  deploy:
+    name: Deploy ${{ matrix.architecture }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - architecture: x64
             target: x86_64-pc-windows-gnu
-            cargo_alias: build-x64
           - architecture: x86
             target: i686-pc-windows-gnu
-            cargo_alias: build-x86
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends gcc-mingw-w64
       - run: rustup toolchain install
-      - run: cargo ${{ matrix.cargo_alias }}
-      - name: Check that only Windows system DLLs are imported
-        run: |
-          imports=$(x86_64-w64-mingw32-objdump -p target/${{ matrix.target }}/release/NppToolBox.dll | sed -n 's/^\s*DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
-          echo "$imports"
-          unexpected=$(echo "$imports" | grep -vE '^(kernel32|user32|gdi32|ntdll|msvcrt|advapi32|ole32|oleaut32|shell32|dwmapi|bcryptprimitives|api-ms-win-[a-z0-9-]+)\.dll$' || true)
-          test -z "$unexpected" || { echo "Unexpected runtime dependencies: $unexpected"; exit 1; }
-      - name: Package
-        run: |
-          mkdir -p package/NppToolBox
-          cp target/${{ matrix.target }}/release/NppToolBox.dll LICENSE README.md THIRD-PARTY-NOTICES.md package/NppToolBox/
+      # Builds the release DLL, rejects imports of non-system DLLs and writes the package folder.
+      - run: cargo deploy-${{ matrix.architecture }}
       - uses: actions/upload-artifact@v4
         with:
           name: NppToolBox-${{ matrix.architecture }}
-          path: package/
+          path: target/${{ matrix.target }}/package/

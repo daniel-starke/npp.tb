@@ -10,8 +10,12 @@ mod escape;
 mod github_style;
 pub(crate) mod heading_anchor;
 mod math;
+mod math_equations;
+mod math_macros;
 mod math_symbols;
 pub(crate) mod raw_html;
+
+pub(crate) use math::latex_to_mathml;
 
 use std::ops::Range;
 
@@ -19,9 +23,11 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Options, Parser,
 
 use crate::emoji::{TextPart, for_each_part};
 use crate::image_embedding::EmbeddedImage;
+use crate::mermaid::{self, Image, Output, RenderDiagram};
 use escape::{is_safe_url, push_escaped_attribute, push_escaped_text};
 use github_style::inline;
 use heading_anchor::HeadingAnchors;
+use math_equations::Equations;
 
 pub(crate) use github_style::AlertKind;
 
@@ -63,6 +69,8 @@ pub struct RenderOptions<'a> {
 	/// Colors images like the alert icons for `github-markdown-dark.css`. Inline styles are always
 	/// light.
 	pub is_dark: bool,
+	/// Renders the code of ```` ```mermaid ```` blocks; `None` keeps them as code.
+	pub render_diagram: Option<&'a mut RenderDiagram<'a>>,
 }
 
 /// The HTML for `markdown`, to be placed in [`html_page`] or [`inline_styled_fragment`].
@@ -80,6 +88,23 @@ pub fn render_markdown(markdown: &str, options: &mut RenderOptions) -> String {
 	let mut writer = HtmlWriter::new(&events, &event_lines, options);
 	writer.write_all();
 	writer.output
+}
+
+/// Markdown of a fenced code block with `code` and the info string `info_language`. The fence is
+/// longer than every backtick run in `code`, so no line of it closes the block.
+pub fn fenced_code_block(code: &str, info_language: &str) -> String {
+	let mut longest_run = 0;
+	let mut run = 0;
+	for character in code.chars() {
+		run = if character == '`' { run + 1 } else { 0 };
+		longest_run = longest_run.max(run);
+	}
+	let fence = "`".repeat((longest_run + 1).max(3));
+	let line_break = match code.is_empty() || code.ends_with('\n') {
+		true => "",
+		false => "\n",
+	};
+	format!("{fence}{info_language}\n{code}{line_break}{fence}\n")
 }
 
 /// A complete page with the GitHub style sheet around `body` from [`Styling::StyleSheet`].
@@ -170,6 +195,7 @@ struct HtmlWriter<'events, 'input, 'options, 'callbacks> {
 	metadata_block: Option<String>,
 	table: TableState,
 	heading_anchors: HeadingAnchors,
+	equations: Equations,
 	footnote_references: Vec<FootnoteReference>,
 	footnote_definition_label: Option<String>,
 	footnote_definitions: Vec<(String, String)>,
@@ -183,6 +209,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		event_lines: &'events [usize],
 		options: &'options mut RenderOptions<'callbacks>,
 	) -> Self {
+		let equations = Equations::new(options.styling != Styling::Inline);
 		Self {
 			events,
 			event_lines,
@@ -199,6 +226,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 			metadata_block: None,
 			table: TableState::default(),
 			heading_anchors: HeadingAnchors::default(),
+			equations,
 			footnote_references: Vec::new(),
 			footnote_definition_label: None,
 			footnote_definitions: Vec::new(),
@@ -225,6 +253,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		}
 		self.flush_text();
 		self.write_footnotes();
+		self.equations.resolve_references(&mut self.output);
 	}
 
 	fn is_inline_styled(&self) -> bool {
@@ -256,6 +285,16 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 	/// Writes `<tag ...>` of a block that starts at the event `index`.
 	fn block_tag(&mut self, index: usize, tag: &str, class: &str, inline_style: &str) {
 		self.start_tag(tag, class, inline_style);
+		self.push_source_line(index);
+		self.output.push('>');
+	}
+
+	/// A block element with `style` in both stylings, for elements GitHub's style sheet has no
+	/// class for.
+	fn styled_block_tag(&mut self, index: usize, tag: &str, style: &str) {
+		self.output.push('<');
+		self.output.push_str(tag);
+		self.push_attribute("style", style);
 		self.push_source_line(index);
 		self.output.push('>');
 	}
@@ -649,6 +688,20 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		if code.ends_with('\n') {
 			code.pop();
 		}
+		// Office applications drop inline SVG, so inline styles get a picture, at twice the size
+		// for sharp pictures on high resolution screens and in print.
+		let output = match self.is_inline_styled() {
+			true => Output::Png { scale: 2.0 },
+			false => Output::Svg,
+		};
+		if language.eq_ignore_ascii_case("mermaid")
+			&& let Some(render_diagram) = self.options.render_diagram.as_mut()
+		{
+			match render_diagram(&code, output) {
+				Ok(image) => return self.push_diagram(start_index, &image),
+				Err(error) => self.push_diagram_error(start_index, &error),
+			}
+		}
 		if language.eq_ignore_ascii_case("math") {
 			// In a paragraph for its margins, like `$$` math.
 			self.block_tag(start_index, "p", "", inline::PARAGRAPH);
@@ -664,6 +717,37 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 		self.simple_tag("code", inline::CODE_BLOCK_CODE);
 		self.push_highlighted_code(&code, &spans);
 		self.output.push_str("</code></pre>\n");
+	}
+
+	fn push_diagram(&mut self, start_index: usize, image: &Image) {
+		match image {
+			Image::Svg(diagram) => {
+				self.styled_block_tag(start_index, "div", inline::DIAGRAM);
+				self.output.push_str(&diagram.svg);
+				self.output.push_str("</div>\n");
+			}
+			Image::Png(png) => {
+				let image = EmbeddedImage { media_type: "image/png", bytes: png.bytes.clone() };
+				self.simple_tag("p", inline::PARAGRAPH);
+				self.start_tag("img", "", inline::IMAGE);
+				self.push_attribute("src", &image.data_uri());
+				self.output.push_str(&format!(
+					" width=\"{}\" height=\"{}\" alt=\"Mermaid diagram\"></p>\n",
+					png.width, png.height
+				));
+			}
+		}
+	}
+
+	/// A note on the error above the code of the diagram.
+	fn push_diagram_error(&mut self, start_index: usize, error: &mermaid::Error) {
+		let style = match self.options.is_dark && !self.is_inline_styled() {
+			true => inline::DIAGRAM_ERROR_DARK,
+			false => inline::DIAGRAM_ERROR,
+		};
+		self.styled_block_tag(start_index, "p", style);
+		push_escaped_text(&mut self.output, &format!("Unable to render Mermaid diagram: {error}"));
+		self.output.push_str("</p>\n");
 	}
 
 	fn push_highlighted_code(&mut self, code: &str, spans: &[HighlightedSpan]) {
@@ -751,7 +835,7 @@ impl<'events, 'input, 'options, 'callbacks> HtmlWriter<'events, 'input, 'options
 	}
 
 	fn push_math(&mut self, latex: &str, is_display: bool) {
-		math::push_math(&mut self.output, latex, is_display);
+		math::push_math(&mut self.output, latex, is_display, &mut self.equations);
 	}
 
 	fn task_list_marker(&mut self, is_checked: bool) {

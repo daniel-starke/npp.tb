@@ -4,6 +4,7 @@
 //! the light and the dark theme and writes a Rust source file declaring one `npp::ToolbarIcon` per
 //! SVG, ready to be `include!`d. The plugin renders them at runtime in the size Notepad++ needs. [`minify_css`] shrinks style sheets
 //! that a plugin embeds. [`link_resource_script`] links a version resource into the DLL.
+//! [`link_stdcall_exports`] exports the `__stdcall` Lexilla functions of 32-bit DLLs undecorated.
 //!
 //! Master icon contract (enforced by [`validate_icon`]):
 //! - `viewBox="0 0 N N"` with `N` = [`IconStyle::canvas_size`],
@@ -27,6 +28,19 @@ mod resource;
 pub use css::minify_css;
 pub use icon_style::{IconStyle, ThemedColor};
 pub use resource::{VERSION_HEADER, link_resource_script};
+
+/// Lets the 32-bit GNU linker export the `extern "system"` functions of `npp::export_plugin!`
+/// (`GetLexerCount`, `GetLexerName`, `CreateLexer`) under their undecorated names without a
+/// warning. Rust's export list names them undecorated, while their symbols carry the `__stdcall`
+/// decoration (`_CreateLexer@4`); `ld` resolves them with its stdcall fixup and warns unless the
+/// fixup is enabled explicitly. Notepad++ looks the functions up by their undecorated names.
+pub fn link_stdcall_exports() {
+	let target_architecture = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+	let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+	if target_architecture == "x86" && target_os == "windows" {
+		println!("cargo:rustc-link-arg-cdylib=-Wl,--enable-stdcall-fixup");
+	}
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {

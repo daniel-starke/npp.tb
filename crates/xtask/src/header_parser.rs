@@ -70,6 +70,52 @@ pub fn struct_fields(source: &str, name: &str) -> Option<Vec<String>> {
 	None
 }
 
+/// Rows of the initializer of the array `name`, e.g. `T Class::name[N] = { {L"a", 1}, ... };`,
+/// each as its trimmed fields: `[["L\"a\"", "1"], ...]`. Commas and braces inside string
+/// literals are kept.
+pub fn array_initializer_rows(source: &str, name: &str) -> Option<Vec<Vec<String>>> {
+	let source = strip_comments(source);
+	let declaration = source.find(&format!("{name}["))?;
+	let after_declaration = &source[declaration..];
+	let initializer = &after_declaration[after_declaration.find('=')?..];
+	let body = &initializer[initializer.find('{')? + 1..];
+	let mut rows = Vec::new();
+	let mut fields = Vec::new();
+	let mut field = String::new();
+	let mut depth = 0usize;
+	let mut is_in_literal = false;
+	let mut is_escaped = false;
+	for character in body.chars() {
+		if is_in_literal {
+			field.push(character);
+			is_in_literal = character != '"' || is_escaped;
+			is_escaped = character == '\\' && !is_escaped;
+			continue;
+		}
+		match character {
+			'}' if depth == 0 => return Some(rows),
+			'{' if depth == 0 => depth = 1,
+			'}' if depth == 1 => {
+				depth = 0;
+				fields.push(std::mem::take(&mut field).trim().to_owned());
+				rows.push(std::mem::take(&mut fields));
+			}
+			',' if depth == 1 => fields.push(std::mem::take(&mut field).trim().to_owned()),
+			_ if depth == 0 => {}
+			_ => {
+				match character {
+					'"' => is_in_literal = true,
+					'{' => depth += 1,
+					'}' => depth -= 1,
+					_ => {}
+				}
+				field.push(character);
+			}
+		}
+	}
+	None
+}
+
 /// Byte offset of the `}` closing a block whose opening brace precedes `text`.
 fn matching_brace_end(text: &str) -> Option<usize> {
 	let mut depth = 0usize;
@@ -385,5 +431,23 @@ mod tests {
 			])
 		);
 		assert_eq!(struct_fields(header, "Func"), None);
+	}
+
+	#[test]
+	fn extracts_array_initializer_rows() {
+		let source = "int other[2] = { 1, 2 };\nInfo View::_names[L_END + 1] = {\n\t// {L\"commented\", L_NO},\n\t{L\"normal\",  L\"Text, plain {}\", L_TEXT},\n\t{L\"q\\\"uote\", L\"\", L_USER}\n};";
+		assert_eq!(
+			array_initializer_rows(source, "_names"),
+			Some(vec![
+				vec![
+					"L\"normal\"".to_owned(),
+					"L\"Text, plain {}\"".to_owned(),
+					"L_TEXT".to_owned()
+				],
+				vec!["L\"q\\\"uote\"".to_owned(), "L\"\"".to_owned(), "L_USER".to_owned()],
+			])
+		);
+		assert_eq!(array_initializer_rows(source, "_missing"), None);
+		assert_eq!(array_initializer_rows("int _names[2] = { {1}", "_names"), None);
 	}
 }

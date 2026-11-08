@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Development tasks: plugin build, Notepad++ interface update and icon previews. Run with `cargo xtask`."
+description = "Development tasks: plugin build, Notepad++ interface, emoji, Mermaid theme and Font Awesome updates and icon previews. Run with `cargo xtask`."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

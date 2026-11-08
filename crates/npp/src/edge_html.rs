@@ -28,6 +28,7 @@ use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows_sys::Win32::System::LibraryLoader::{
 	GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::ReplyMessage;
 
 use crate::webview2::{Color, WebViewEvents};
 use crate::wide::to_wide_null_terminated;
@@ -104,6 +105,11 @@ pub fn create_edge_view(
 	// initialized it already, so this only adds a reference that is kept for the process lifetime.
 	// SAFETY: No preconditions. Failure (another apartment model) makes the creation fail below.
 	unsafe { CoInitializeEx(core::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+	// The control fails fast with `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` when it is created while
+	// the thread handles a message sent by another thread or process, e.g. a `WM_COMMAND` sent
+	// by automation tools. Replying releases the sender and allows the outgoing calls.
+	// SAFETY: No preconditions. Does nothing outside of a message sent by another thread.
+	unsafe { ReplyMessage(0) };
 	let process = activate_process()?;
 	let overlay = match overlay::is_gdi_scaled(parent) {
 		true => Some(Overlay::create(parent).ok_or(E_FAIL)?),

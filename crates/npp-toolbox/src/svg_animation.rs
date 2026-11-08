@@ -142,7 +142,7 @@ pub fn smil_as_css(svg: &str) -> Option<String> {
 	}
 	style.push_str("]]></style>");
 	insertions.push((style_position?, style));
-	insertions.sort_by_key(|(position, _)| *position);
+	npp::sort::sort_by_key(&mut insertions[..], |(position, _)| *position);
 	let mut converted =
 		String::with_capacity(svg.len() + insertions.iter().map(|i| i.1.len()).sum::<usize>());
 	let mut copied = 0;

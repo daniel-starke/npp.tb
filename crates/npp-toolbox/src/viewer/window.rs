@@ -12,7 +12,10 @@ use npp::webview2::{ContextMenuRequest as WebView2ContextMenu, HRESULT};
 use npp::wide::to_wide_null_terminated;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
-use windows_sys::Win32::Graphics::Gdi::{COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HFONT};
+use windows_sys::Win32::Graphics::Gdi::{
+	COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT,
+	MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows_sys::Win32::System::SystemServices::{
 	SS_CENTERIMAGE, SS_LEFT, SS_NOPREFIX, SS_PATHELLIPSIS,
 };
@@ -23,14 +26,14 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
 	AppendMenuW, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CW_USEDEFAULT, CreatePopupMenu,
 	CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GW_CHILD, GetClientRect,
-	GetCursorPos, GetWindow, GetWindowRect, HMENU, IDC_ARROW, IsWindowVisible, KillTimer,
+	GetCursorPos, GetWindow, GetWindowRect, HMENU, HWND_TOP, IDC_ARROW, IsWindowVisible, KillTimer,
 	LoadCursorW, MF_GRAYED, MF_STRING, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
-	RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED,
-	SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetParent, SetTimer, SetWindowPos,
-	SetWindowTextW, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE,
-	WM_COMMAND, WM_CONTEXTMENU, WM_MOVE, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_TIMER,
-	WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
-	WS_VISIBLE,
+	RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+	SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+	SetParent, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+	TrackPopupMenu, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_MOVE, WM_NOTIFY, WM_SETFOCUS,
+	WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
+	WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::engine::{BrowserView, Engine};
@@ -215,11 +218,12 @@ impl ViewerWindows {
 		notepad.show_docking_panel(self.panel);
 	}
 
-	/// Shows the host in a new top-level window owned by Notepad++.
+	/// Shows the host in a new top-level window without activating it. It has no owner, because
+	/// Windows keeps owned windows above their owner and raises them with it.
 	pub fn open_frame(&mut self, notepad: &Notepad) {
 		if self.frame.is_null() {
 			let scale = |size: i32| scale_for_dpi(notepad.window(), size);
-			// SAFETY: The class is registered, the owner is the Notepad++ window.
+			// SAFETY: The class is registered.
 			let frame = unsafe {
 				let class = to_wide_null_terminated(FRAME_CLASS);
 				let title = to_wide_null_terminated(TITLE);
@@ -232,7 +236,7 @@ impl ViewerWindows {
 					CW_USEDEFAULT,
 					scale(FRAME_WIDTH),
 					scale(FRAME_HEIGHT),
-					notepad.window(),
+					core::ptr::null_mut(),
 					core::ptr::null_mut(),
 					npp::plugin::module_handle(),
 					core::ptr::null(),
@@ -247,7 +251,18 @@ impl ViewerWindows {
 		}
 		self.move_host_to(self.frame);
 		// SAFETY: Valid window.
-		unsafe { ShowWindow(self.frame, SW_SHOWNORMAL) };
+		unsafe { ShowWindow(self.frame, SW_SHOWNOACTIVATE) };
+		self.raise_frame();
+	}
+
+	/// Moves the separate window to the top of the z-order without activating it.
+	pub fn raise_frame(&self) {
+		if self.frame.is_null() {
+			return;
+		}
+		let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+		// SAFETY: Valid window.
+		unsafe { SetWindowPos(self.frame, HWND_TOP, 0, 0, 0, 0, flags) };
 	}
 
 	/// Moves the host back into the hidden panel and destroys the separate window.
@@ -408,6 +423,20 @@ pub fn open_with_default_application(target: &OsStr) {
 			SW_SHOWNORMAL,
 		)
 	};
+}
+
+/// `screen.availWidth` of a browser in `window`: the width of the work area of its monitor in CSS
+/// pixels. Mermaid's C4 diagrams wrap their rows at this width.
+pub(crate) fn screen_width(window: HWND) -> u32 {
+	// SAFETY: Returns the nearest monitor for any window handle.
+	let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+	let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+	// SAFETY: `info` is a valid `MONITORINFO` with its size set.
+	if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+		return crate::mermaid::DEFAULT_SCREEN_WIDTH;
+	}
+	let width = (info.rcWork.right - info.rcWork.left).max(0) as u32;
+	width * npp::notepad::DEFAULT_DPI / window_dpi(window)
 }
 
 fn window_dpi(window: HWND) -> u32 {

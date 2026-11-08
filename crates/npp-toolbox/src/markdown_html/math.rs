@@ -2,25 +2,55 @@
 //!
 //! Covers the LaTeX commonly written in Markdown: fractions, roots, scripts and limits, Greek
 //! letters and symbols, accents, fonts, `\text`, `\left`/`\right`, matrices, cases and aligned
-//! environments. Unknown commands are shown in red. Malformed input never fails: missing
-//! arguments stay empty and stray tokens are skipped. The nesting depth is limited because a
-//! stack overflow would abort Notepad++.
+//! environments, macro definitions and equation numbers. Unknown commands are shown in red.
+//! Malformed input never fails: missing arguments stay empty and stray tokens are skipped. The
+//! nesting depth is limited because a stack overflow would abort Notepad++.
 
-use super::escape::push_escaped_text;
+use super::escape::{is_safe_url, push_escaped_attribute, push_escaped_text};
+use super::math_equations::Equations;
+use super::math_macros::expand_macros;
 use super::math_symbols::{AccentPosition, Symbol, accent, delimiter_command, negated, symbol};
 
 const MAX_DEPTH: usize = 48;
 const ERROR_COLOR: &str = "#d1242f";
 const FUNCTION_APPLICATION: &str = "<mo>\u{2061}</mo>";
+/// `\displaystyle`, `\textstyle`, `\scriptstyle` and `\scriptscriptstyle`, the styles of `\genfrac`.
+const STYLE_ATTRIBUTES: [&str; 4] = [
+	"displaystyle=\"true\" scriptlevel=\"0\"",
+	"displaystyle=\"false\" scriptlevel=\"0\"",
+	"displaystyle=\"false\" scriptlevel=\"1\"",
+	"displaystyle=\"false\" scriptlevel=\"2\"",
+];
 
-pub fn push_math(output: &mut String, latex: &str, is_display: bool) {
-	output.push_str(match is_display {
-		true => "<math display=\"block\" xmlns=\"http://www.w3.org/1998/Math/MathML\">",
-		false => "<math xmlns=\"http://www.w3.org/1998/Math/MathML\">",
+/// Writes a formula; `equations` holds the labels and numbers of the document so far.
+pub fn push_math(output: &mut String, latex: &str, is_display: bool, equations: &mut Equations) {
+	let expansion = expand_macros(latex, &is_known_command);
+	let mut converter = Converter::new(&expansion.source, is_display);
+	converter.equations = Some(equations);
+	let content = converter.top_level();
+	output.push_str(match (is_display, converter.has_equation_number) {
+		// The number sits at the right end of the line.
+		(true, true) => {
+			"<math display=\"block\" style=\"width:100%\" xmlns=\"http://www.w3.org/1998/Math/MathML\">"
+		}
+		(true, false) => "<math display=\"block\" xmlns=\"http://www.w3.org/1998/Math/MathML\">",
+		(false, _) => "<math xmlns=\"http://www.w3.org/1998/Math/MathML\">",
 	});
-	let mut converter = Converter { source: latex, position: 0, depth: 0, is_display, font: None };
-	output.push_str(&converter.top_level());
+	output.push_str(&content);
 	output.push_str("</math>");
+}
+
+/// `latex` as display math, for callers that treat malformed input like KaTeX's `throwOnError`.
+/// The error is the first thing KaTeX would reject, in its words.
+pub fn latex_to_mathml(latex: &str) -> Result<String, String> {
+	let expansion = expand_macros(latex, &is_known_command);
+	let mut converter = Converter::new(&expansion.source, true);
+	converter.follows_katex = true;
+	let content = converter.top_level();
+	match expansion.error.or(converter.first_error) {
+		Some(error) => Err(error),
+		None => Ok(format!("<math display=\"block\">{content}</math>")),
+	}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +80,42 @@ enum Context {
 	LeftRight,
 	/// A cell of an environment or of the top level, ended by `&` or `\\`.
 	Cell,
+	/// A cell of `CD`, which an arrow ends too.
+	CommutativeCell,
+	/// A label of a `CD` arrow up to the given character.
+	CommutativeLabel(char),
+}
+
+/// Where the rows of [`Converter::rows`] end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowsEnd {
+	TopLevel,
+	Environment,
+	/// The `}` of `\substack`.
+	Group,
+}
+
+/// What the rows of [`Converter::rows`] do with `\tag` and `\label`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowNumbers {
+	/// They stay for the enclosing rows.
+	None,
+	/// A row shows its `\tag`.
+	Tags,
+	/// A row shows its `\tag` or, with a `\label`, the next number.
+	TagsAndLabels,
+}
+
+struct Rows {
+	cells: Vec<Vec<String>>,
+	/// The number of each row, empty for the empty cell of KaTeX.
+	numbers: Vec<Option<String>>,
+}
+
+/// `\tag`
+struct EquationTag {
+	shown: String,
+	number: String,
 }
 
 impl Context {
@@ -65,6 +131,14 @@ impl Context {
 				token == Token::EndGroup || token == Token::Command("right") || is_cell_end
 			}
 			Context::Cell => token == Token::EndGroup || is_cell_end,
+			Context::CommutativeCell => {
+				token == Token::EndGroup || is_cell_end || token == Token::Character('@')
+			}
+			Context::CommutativeLabel(end) => {
+				token == Token::EndGroup
+					|| is_cell_end || token == Token::Character('@')
+					|| token == Token::Character(end)
+			}
 		}
 	}
 }
@@ -118,9 +192,88 @@ struct Converter<'a> {
 	depth: usize,
 	is_display: bool,
 	font: Option<Font>,
+	/// The first malformed input, which [`push_math`] tolerates.
+	first_error: Option<String>,
+	/// Writes the characters and spaces of KaTeX's MathML, as a browser's layout depends on them.
+	follows_katex: bool,
+	/// The labels and numbers of a document; KaTeX has neither `\label` nor `\ref`.
+	equations: Option<&'a mut Equations>,
+	/// Whether the whole formula is display math, unlike `is_display`, which changes inside of it.
+	is_display_formula: bool,
+	/// Inside of an environment that numbers its rows, which then gets `\tag` and `\label`.
+	is_in_numbered_rows: bool,
+	has_equation_number: bool,
+	pending_tag: Option<EquationTag>,
+	pending_labels: Vec<&'a str>,
+	/// `\nonumber` in the current row.
+	is_row_unnumbered: bool,
 }
 
 impl<'a> Converter<'a> {
+	fn new(source: &'a str, is_display: bool) -> Self {
+		Self {
+			source,
+			position: 0,
+			depth: 0,
+			is_display,
+			font: None,
+			first_error: None,
+			follows_katex: false,
+			equations: None,
+			is_display_formula: is_display,
+			is_in_numbered_rows: false,
+			has_equation_number: false,
+			pending_tag: None,
+			pending_labels: Vec::new(),
+			is_row_unnumbered: false,
+		}
+	}
+
+	/// Notes an error at the source range `start..end`, formatted like KaTeX's `ParseError`.
+	fn fail(&mut self, message: &str, start: usize, end: usize) {
+		if self.first_error.is_some() {
+			return;
+		}
+		let source = self.source;
+		let (start, end) = (start.min(source.len()), end.min(source.len()));
+		let (before, after) = (source.get(..start).unwrap_or(""), source.get(end..).unwrap_or(""));
+		let underlined: String = source
+			.get(start..end)
+			.unwrap_or("")
+			.chars()
+			.flat_map(|character| [character, '\u{332}'])
+			.collect();
+		let before_count = before.chars().count();
+		let left: String = before.chars().skip(before_count.saturating_sub(15)).collect();
+		let left_mark = if before_count > 15 { "…" } else { "" };
+		let right: String = after.chars().take(15).collect();
+		let right_mark = if after.chars().count() > 15 { "…" } else { "" };
+		let place = match start == source.len() {
+			true => "at end of input".to_owned(),
+			false => format!("at position {}", before_count + 1),
+		};
+		self.first_error =
+			Some(format!("{message} {place}: {left_mark}{left}{underlined}{right}{right_mark}"));
+	}
+
+	/// Notes an unexpected next token, or the end of the input.
+	fn fail_expected(&mut self, expected: &str) {
+		self.skip_whitespace_and_comments();
+		let start = self.position;
+		let found = self.peek_token().map(token_text);
+		let position = self.position;
+		self.next_token();
+		let end = self.position;
+		self.position = position;
+		let message = format!("Expected '{expected}', got '{}'", found.as_deref().unwrap_or("EOF"));
+		self.fail(&message, start, end);
+	}
+
+	fn fail_too_deep(&mut self) {
+		let end = self.source.len();
+		self.fail("Too many nested groups", end, end);
+	}
+
 	fn rest(&self) -> &'a str {
 		self.source.get(self.position..).unwrap_or("")
 	}
@@ -179,6 +332,7 @@ impl<'a> Converter<'a> {
 	fn enter(&mut self) -> bool {
 		if self.depth >= MAX_DEPTH {
 			self.position = self.source.len();
+			self.fail_too_deep();
 			return false;
 		}
 		self.depth += 1;
@@ -190,20 +344,39 @@ impl<'a> Converter<'a> {
 	}
 
 	fn top_level(&mut self) -> String {
-		let mut rows = self.rows(false);
-		if rows.len() == 1 && rows.first().is_some_and(|row| row.len() == 1) {
-			return rows.pop().and_then(|mut row| row.pop()).unwrap_or_default();
+		let row_numbers = match (self.equations.is_some(), self.is_display_formula) {
+			(true, true) => RowNumbers::TagsAndLabels,
+			_ => RowNumbers::None,
+		};
+		let mut rows = self.rows(RowsEnd::TopLevel, row_numbers);
+		let has_numbers = rows.numbers.iter().any(Option::is_some);
+		let content = if rows.cells.len() == 1 && rows.cells[0].len() == 1 && !has_numbers {
+			rows.cells.pop().and_then(|mut row| row.pop()).unwrap_or_default()
+		} else if self.follows_katex {
+			// KaTeX's `\\` is a space of no width outside of environments, so there is one line.
+			let cells: Vec<String> = rows.cells.into_iter().flatten().collect();
+			format!("<mrow>{}</mrow>", cells.join("<mspace/>"))
+		} else {
+			let has_columns = rows.cells.iter().any(|row| row.len() > 1);
+			let alignment =
+				if has_columns { ColumnAlignment::RightLeft } else { ColumnAlignment::Center };
+			table(&rows, &[], alignment, true)
+		};
+		match self.pending_tag.take() {
+			// KaTeX tags the whole formula.
+			Some(tag) if self.follows_katex => format!(
+				"<mtable style=\"width:100%\"><mtr><mtd style=\"width:50%\"></mtd><mtd>{content}</mtd><mtd style=\"width:50%\"></mtd><mtd>{}</mtd></mtr></mtable>",
+				text_element(&tag.shown, "")
+			),
+			_ => content,
 		}
-		let has_columns = rows.iter().any(|row| row.len() > 1);
-		let alignment =
-			if has_columns { ColumnAlignment::RightLeft } else { ColumnAlignment::Center };
-		table(&rows, &[], alignment, true)
 	}
 
-	/// Cells separated by `&` and rows by `\\`, up to `\end` of an environment or the end of
-	/// the input (top level).
-	fn rows(&mut self, is_environment: bool) -> Vec<Vec<String>> {
+	/// Cells separated by `&` and rows by `\\`, up to the given end.
+	fn rows(&mut self, end: RowsEnd, row_numbers: RowNumbers) -> Rows {
+		let is_environment = end == RowsEnd::Environment;
 		let mut rows = vec![Vec::new()];
+		let mut numbers = Vec::new();
 		loop {
 			let cell = self.sequence(Context::Cell);
 			if let Some(row) = rows.last_mut() {
@@ -212,15 +385,21 @@ impl<'a> Converter<'a> {
 			match self.peek_token() {
 				None => break,
 				Some(Token::Alignment) => {
+					if end == RowsEnd::TopLevel {
+						self.fail_expected("EOF");
+					}
 					self.next_token();
 				}
 				Some(LINE_BREAK | Token::Command("cr" | "newline")) => {
 					self.next_token();
 					self.skip_optional_bracket();
+					numbers.push(self.row_number(row_numbers));
 					rows.push(Vec::new());
 				}
 				Some(Token::Command("end")) if is_environment => break,
+				Some(Token::EndGroup) if end == RowsEnd::Group => break,
 				Some(Token::Command("end")) => {
+					self.fail_expected("EOF");
 					self.next_token();
 					let name = self.raw_argument().unwrap_or("");
 					if let Some(row) = rows.last_mut() {
@@ -229,6 +408,7 @@ impl<'a> Converter<'a> {
 				}
 				// A stray `}` or anything else the cell stopped at.
 				Some(_) => {
+					self.fail_expected(if is_environment { "\\end" } else { "EOF" });
 					self.next_token();
 				}
 			}
@@ -236,8 +416,42 @@ impl<'a> Converter<'a> {
 		// `\\` after the last row does not start a new one.
 		if rows.len() > 1 && rows.last().is_some_and(|row| row.iter().all(String::is_empty)) {
 			rows.pop();
+		} else {
+			numbers.push(self.row_number(row_numbers));
 		}
-		rows
+		Rows { cells: rows, numbers }
+	}
+
+	/// The number of the row that just ended, as the content of its cell.
+	fn row_number(&mut self, row_numbers: RowNumbers) -> Option<String> {
+		if row_numbers == RowNumbers::None {
+			return None;
+		}
+		let is_unnumbered = std::mem::take(&mut self.is_row_unnumbered);
+		let tag = self.pending_tag.take();
+		if self.follows_katex {
+			// `\tag` draws nothing here: KaTeX's MathML has an empty cell for the number.
+			let is_numbered = row_numbers == RowNumbers::TagsAndLabels && !is_unnumbered;
+			return (is_numbered || tag.is_some()).then(String::new);
+		}
+		let labels = std::mem::take(&mut self.pending_labels);
+		let tag = match tag {
+			Some(tag) => tag,
+			None if !labels.is_empty()
+				&& !is_unnumbered
+				&& row_numbers == RowNumbers::TagsAndLabels =>
+			{
+				let number = self.equations.as_mut()?.next_number();
+				EquationTag { shown: format!("({number})"), number }
+			}
+			None => return None,
+		};
+		let equations = self.equations.as_mut()?;
+		for label in labels {
+			equations.set_number(label, &tag.number);
+		}
+		self.has_equation_number = true;
+		Some(text_element(&tag.shown, ""))
 	}
 
 	/// Atoms up to the end of `context`, which is not consumed.
@@ -253,16 +467,28 @@ impl<'a> Converter<'a> {
 					let denominator = self.nested_sequence(context);
 					return infix_fraction(command, &items, &denominator);
 				}
+				Token::Command("above") => {
+					self.next_token();
+					let thickness = self.dimension().map_or_else(String::new, |thickness| {
+						format!(" linethickness=\"{}\"", line_thickness(&thickness))
+					});
+					let denominator = self.nested_sequence(context);
+					return format!(
+						"<mfrac{thickness}><mrow>{items}</mrow><mrow>{denominator}</mrow></mfrac>"
+					);
+				}
 				Token::Command(
 					command @ ("displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle"),
 				) => {
 					self.next_token();
-					let rest = self.nested_sequence(context);
+					let rest = self.with_display(command == "displaystyle", |converter| {
+						converter.nested_sequence(context)
+					});
 					let attributes = match command {
-						"displaystyle" => "displaystyle=\"true\" scriptlevel=\"0\"",
-						"textstyle" => "displaystyle=\"false\" scriptlevel=\"0\"",
-						"scriptstyle" => "displaystyle=\"false\" scriptlevel=\"1\"",
-						_ => "displaystyle=\"false\" scriptlevel=\"2\"",
+						"displaystyle" => STYLE_ATTRIBUTES[0],
+						"textstyle" => STYLE_ATTRIBUTES[1],
+						"scriptstyle" => STYLE_ATTRIBUTES[2],
+						_ => STYLE_ATTRIBUTES[3],
 					};
 					items.push_str(&format!("<mstyle {attributes}>{rest}</mstyle>"));
 					break;
@@ -309,6 +535,14 @@ impl<'a> Converter<'a> {
 		sequence
 	}
 
+	/// Converts in display style or not, which decides where limits go.
+	fn with_display<T>(&mut self, is_display: bool, convert: impl FnOnce(&mut Self) -> T) -> T {
+		let outer = std::mem::replace(&mut self.is_display, is_display);
+		let converted = convert(self);
+		self.is_display = outer;
+		converted
+	}
+
 	fn with_font(&mut self, font: Font, convert: impl FnOnce(&mut Self) -> String) -> String {
 		let outer_font = self.font.replace(font);
 		let converted = convert(self);
@@ -333,8 +567,15 @@ impl<'a> Converter<'a> {
 				| Token::Superscript
 				| Token::Subscript
 				| Token::Command("end" | "right"),
-			)
-			| None => "<mrow></mrow>".to_owned(),
+			) => {
+				self.fail_expected("group");
+				"<mrow></mrow>".to_owned()
+			}
+			None => {
+				let end = self.source.len();
+				self.fail("Unexpected end of input in a macro argument, expected '}'", end, end);
+				"<mrow></mrow>".to_owned()
+			}
 			Some(token) => {
 				self.next_token();
 				self.atom(token, true).map(|atom| atom.mathml).unwrap_or_default()
@@ -349,6 +590,8 @@ impl<'a> Converter<'a> {
 		let content = self.sequence(Context::Group);
 		if self.peek_token() == Some(Token::EndGroup) {
 			self.next_token();
+		} else {
+			self.fail_expected("}");
 		}
 		format!("<mrow>{content}</mrow>")
 	}
@@ -368,12 +611,23 @@ impl<'a> Converter<'a> {
 			Token::ControlSymbol(control_symbol) => match control_symbol {
 				'{' => fence("{", false),
 				'}' => fence("}", false),
+				'|' if self.follows_katex => upright_identifier("∥"),
 				'|' => fence("‖", false),
+				'%' | '&' | '#' | '$' | '_' if self.follows_katex => {
+					upright_identifier(&control_symbol.to_string())
+				}
 				'%' | '&' | '#' | '$' | '_' => operator_element(&control_symbol.to_string()),
 				'\\' => return None,
 				_ => match symbol(&control_symbol.to_string()) {
-					Some(Symbol::Space(width)) => space(width),
-					_ => error_text(&format!("\\{control_symbol}")),
+					Some(Symbol::Space(width)) => self.space(width),
+					_ => {
+						let end = self.position;
+						let start = end.saturating_sub(1 + control_symbol.len_utf8());
+						let text = format!("\\{control_symbol}");
+						let message = format!("Undefined control sequence: {text}");
+						self.fail(&message, start, end);
+						error_text(&text)
+					}
 				},
 			},
 			Token::Command(name) => return self.command(name),
@@ -396,10 +650,16 @@ impl<'a> Converter<'a> {
 				mathml.push_str("</mn>");
 				mathml
 			}
+			'#' if self.follows_katex => {
+				let end = self.position;
+				self.fail("Expected 'EOF', got '#'", end.saturating_sub(1), end);
+				operator_element("#")
+			}
 			'~' => "<mtext>\u{a0}</mtext>".to_owned(),
 			'\'' => operator_element("′"),
 			'-' => operator_element("−"),
 			'*' => operator_element("∗"),
+			'|' if self.follows_katex => upright_identifier("∣"),
 			'(' | ')' | '[' | ']' | '|' | '/' => fence(&character.to_string(), false),
 			_ if character.is_alphabetic() => self.identifier(character),
 			_ => operator_element(&character.to_string()),
@@ -441,8 +701,9 @@ impl<'a> Converter<'a> {
 	fn command(&mut self, name: &'a str) -> Option<Atom> {
 		let mathml = match name {
 			"frac" | "dfrac" | "tfrac" | "cfrac" => {
-				let numerator = self.argument();
-				let denominator = self.argument();
+				let is_display = matches!(name, "dfrac" | "cfrac");
+				let numerator = self.with_display(is_display, Self::argument);
+				let denominator = self.with_display(is_display, Self::argument);
 				let fraction = format!("<mfrac>{numerator}{denominator}</mfrac>");
 				match name {
 					"dfrac" | "cfrac" => {
@@ -453,8 +714,9 @@ impl<'a> Converter<'a> {
 				}
 			}
 			"binom" | "dbinom" | "tbinom" => {
-				let top = self.argument();
-				let bottom = self.argument();
+				let is_display = name == "dbinom";
+				let top = self.with_display(is_display, Self::argument);
+				let bottom = self.with_display(is_display, Self::argument);
 				let binomial = format!(
 					"<mrow>{}<mfrac linethickness=\"0\">{top}{bottom}</mfrac>{}</mrow>",
 					fence("(", true),
@@ -476,6 +738,9 @@ impl<'a> Converter<'a> {
 			}
 			"left" => self.left_right(),
 			"right" | "middle" => {
+				let end = self.position;
+				let message = format!("Expected 'EOF', got '\\{name}'");
+				self.fail(&message, end.saturating_sub(name.len() + 1), end);
 				let delimiter = self.delimiter().unwrap_or("");
 				fence(delimiter, true)
 			}
@@ -515,27 +780,42 @@ impl<'a> Converter<'a> {
 				" mathvariant=\"sans-serif\" style=\"font-family:sans-serif\"",
 			),
 			"mathrm" | "mathbf" | "mathit" | "mathsf" | "mathtt" | "mathcal" | "mathscr"
-			| "mathfrak" | "mathbb" | "boldsymbol" | "bm" | "mathbfit" | "mathnormal" => {
+			| "mathfrak" | "mathbb" | "boldsymbol" | "bm" | "mathbfit" | "mathnormal" | "Bbb"
+			| "bold" | "frak" => {
 				let font = match name {
 					"mathrm" => Font::Roman,
-					"mathbf" => Font::Bold,
+					"mathbf" | "bold" => Font::Bold,
 					"mathit" | "mathnormal" => Font::Italic,
 					"mathsf" => Font::SansSerif,
 					"mathtt" => Font::Monospace,
 					"mathcal" | "mathscr" => Font::Script,
-					"mathfrak" => Font::Fraktur,
-					"mathbb" => Font::DoubleStruck,
+					"mathfrak" | "frak" => Font::Fraktur,
+					"mathbb" | "Bbb" => Font::DoubleStruck,
 					_ => Font::BoldItalic,
 				};
 				self.with_font(font, Self::argument)
 			}
+			"pmb" => {
+				format!(
+					"<mstyle style=\"text-shadow: 0.02em 0.01em 0.04px\">{}</mstyle>",
+					self.argument()
+				)
+			}
 			"operatorname" | "operatornamewithlimits" => {
+				let is_starred = self.rest().starts_with('*');
+				if is_starred {
+					self.position += 1;
+				}
 				let operator_name = self.raw_argument().unwrap_or("").trim().trim_end_matches('*');
 				let mut mathml = String::from("<mi>");
 				push_escaped_text(&mut mathml, operator_name);
 				mathml.push_str("</mi>");
-				let limits = match name {
-					"operatornamewithlimits" => Limits::InDisplay,
+				let limits = match (name, is_starred) {
+					("operatornamewithlimits", _) => Limits::InDisplay,
+					(_, true) => {
+						mathml.push_str(FUNCTION_APPLICATION);
+						Limits::InDisplay
+					}
 					_ => {
 						mathml.push_str(FUNCTION_APPLICATION);
 						Limits::Never
@@ -556,12 +836,62 @@ impl<'a> Converter<'a> {
 					_ => format!("<mover>{base}{script}</mover>"),
 				}
 			}
-			"xrightarrow" | "xleftarrow" => {
+			"genfrac" => self.general_fraction(),
+			"substack" => self.substack(),
+			"smash" => {
+				let edges = self.raw_optional_bracket().unwrap_or("tb");
+				let height = if edges.contains('t') { " height=\"0px\"" } else { "" };
+				let depth = if edges.contains('b') { " depth=\"0px\"" } else { "" };
+				format!("<mpadded{height}{depth}>{}</mpadded>", self.argument())
+			}
+			"raisebox" => {
+				let offset = self.dimension().unwrap_or_else(|| "0em".to_owned());
+				let text = text_element(self.raw_argument().unwrap_or(""), "");
+				format!(
+					"<mpadded voffset=\"{offset}\"><mstyle {}>{text}</mstyle></mpadded>",
+					STYLE_ATTRIBUTES[1]
+				)
+			}
+			"rule" => self.rule(),
+			"llap" | "rlap" | "clap" => {
+				let content = text_element(self.raw_argument().unwrap_or(""), "");
+				self.overlap(name, &content)
+			}
+			"mathllap" | "mathrlap" | "mathclap" => {
+				let content = self.argument();
+				self.overlap(name, &content)
+			}
+			"colorbox" | "fcolorbox" => {
+				let frame = match name {
+					"fcolorbox" => valid_color(self.raw_argument().unwrap_or("")),
+					_ => None,
+				};
+				let background = valid_color(self.raw_argument().unwrap_or(""));
+				let text = text_element(self.raw_argument().unwrap_or(""), "");
+				color_box(frame, background, &text)
+			}
+			"smallint" => {
+				let mathml = "<mo largeop=\"false\">∫</mo>".to_owned();
+				let limits = if self.follows_katex { Limits::InDisplay } else { Limits::Never };
+				return Some(Atom { mathml, limits });
+			}
+			"varlimsup" => {
+				let mathml =
+					"<mover accent=\"true\"><mi>lim</mi><mo stretchy=\"true\">‾</mo></mover>";
+				return Some(Atom { mathml: mathml.to_owned(), limits: Limits::InDisplay });
+			}
+			"varliminf" => {
+				let mathml = "<munder accentunder=\"true\"><mi>lim</mi><mo stretchy=\"true\">_</mo></munder>";
+				return Some(Atom { mathml: mathml.to_owned(), limits: Limits::InDisplay });
+			}
+			"xrightarrow" | "xleftarrow" | "xleftrightarrow" | "xRightarrow" | "xLeftarrow"
+			| "xLeftrightarrow" | "xmapsto" | "xhookrightarrow" | "xhookleftarrow"
+			| "xrightleftharpoons" | "xlongequal" => {
 				let below = self.optional_bracket();
 				let above = self.argument();
 				let arrow = format!(
 					"<mo stretchy=\"true\" minsize=\"2em\">{}</mo>",
-					if name == "xrightarrow" { "→" } else { "←" }
+					extensible_arrow(name)
 				);
 				match below {
 					Some(below) => {
@@ -580,17 +910,31 @@ impl<'a> Converter<'a> {
 				)
 			}
 			"cancel" | "bcancel" | "xcancel" | "sout" => {
-				let notation = match name {
-					"cancel" => "updiagonalstrike",
-					"bcancel" => "downdiagonalstrike",
-					"xcancel" => "updiagonalstrike downdiagonalstrike",
-					_ => "horizontalstrike",
+				// Browsers ignore `notation`: the style draws the lines.
+				let (notation, directions): (_, &[_]) = match name {
+					"cancel" => ("updiagonalstrike", &["to bottom right"]),
+					"bcancel" => ("downdiagonalstrike", &["to top right"]),
+					"xcancel" => (
+						"updiagonalstrike downdiagonalstrike",
+						&["to bottom right", "to top right"],
+					),
+					_ => ("horizontalstrike", &["to bottom"]),
 				};
+				let lines: Vec<String> =
+					directions.iter().map(|direction| strike_line(direction)).collect();
 				let content = self.argument();
-				format!("<menclose notation=\"{notation}\">{content}</menclose>")
+				format!(
+					"<menclose notation=\"{notation}\" style=\"background:{}\">{content}</menclose>",
+					lines.join(",")
+				)
 			}
-			"phantom" | "hphantom" | "vphantom" => {
-				format!("<mphantom>{}</mphantom>", self.argument())
+			"phantom" => format!("<mphantom>{}</mphantom>", self.argument()),
+			"hphantom" => format!(
+				"<mpadded height=\"0px\" depth=\"0px\"><mphantom>{}</mphantom></mpadded>",
+				self.argument()
+			),
+			"vphantom" => {
+				format!("<mpadded width=\"0px\"><mphantom>{}</mphantom></mpadded>", self.argument())
 			}
 			"textcolor" => {
 				let color = self.raw_argument().unwrap_or("");
@@ -623,38 +967,390 @@ impl<'a> Converter<'a> {
 			"mathop" | "mathbin" | "mathrel" | "mathord" | "mathopen" | "mathclose"
 			| "mathpunct" | "mathinner" => self.argument(),
 			"href" => {
-				// The link target is dropped. Links inside formulas are rare.
-				self.raw_argument();
-				self.argument()
+				let url = self.raw_argument().unwrap_or("").trim();
+				let content = self.argument();
+				self.link(url, content)
 			}
-			"label" | "tag" | "cline" => {
+			"tag" => {
+				self.tag();
+				return None;
+			}
+			"label" if self.equations.is_some() => return self.label(),
+			"ref" | "eqref" if self.equations.is_some() => {
+				let label = self.raw_argument().unwrap_or("").trim();
+				self.equations.as_mut()?.reference(label, name == "eqref")
+			}
+			"nonumber" | "notag" => {
+				self.is_row_unnumbered = true;
+				return None;
+			}
+			"cline" => {
 				self.raw_argument();
 				return None;
 			}
-			"limits" | "nolimits" | "displaylimits" | "hline" | "hdashline" | "nonumber"
-			| "notag" | "relax" | "strut" | "mathstrut" | "nobreak" | "allowbreak" => return None,
+			"limits" | "nolimits" | "displaylimits" | "hline" | "hdashline" | "relax" | "strut"
+			| "mathstrut" | "nobreak" | "allowbreak" => return None,
 			_ => return Some(self.accent_or_symbol(name)),
 		};
 		Some(Atom::new(mathml))
 	}
 
+	/// `\href`: browsers link only HTML elements, which are allowed in `mtext`. The layout of labels
+	/// in SVG takes the link from `mrow`.
+	fn link(&self, url: &str, content: String) -> String {
+		if !is_safe_url(url, false) {
+			return content;
+		}
+		let mut href = String::new();
+		push_escaped_attribute(&mut href, url);
+		if self.follows_katex {
+			return format!("<mrow href=\"{href}\">{content}</mrow>");
+		}
+		if !self.equations.as_ref().is_some_and(|equations| equations.writes_links()) {
+			return content;
+		}
+		format!(
+			"<mtext><a href=\"{href}\"><math displaystyle=\"{}\" xmlns=\"http://www.w3.org/1998/Math/MathML\">{content}</math></a></mtext>",
+			self.is_display
+		)
+	}
+
+	/// `\tag{…}` and `\tag*{…}` for the row in progress.
+	fn tag(&mut self) {
+		let is_starred = self.rest().starts_with('*');
+		if is_starred {
+			self.position += 1;
+		}
+		let start = self.position;
+		let text = self.raw_argument().unwrap_or("");
+		if self.pending_tag.is_some() {
+			if self.first_error.is_none() {
+				self.first_error = Some("Multiple \\tag".to_owned());
+			}
+			return;
+		}
+		if !self.is_display_formula {
+			self.fail("\\tag works only in display equations", start, self.position);
+			return;
+		}
+		let number = plain_text(text);
+		let shown = if is_starred { number.clone() } else { format!("({number})") };
+		self.pending_tag = Some(EquationTag { shown, number });
+	}
+
+	/// `\label{name}`: an anchor, whose number comes with the end of its row.
+	fn label(&mut self) -> Option<Atom> {
+		let name = self.raw_argument().unwrap_or("").trim();
+		if name.is_empty() {
+			return None;
+		}
+		let equations = self.equations.as_mut()?;
+		if !equations.add_label(name) {
+			return Some(Atom::new(error_text(&format!("\\label{{{name}}}"))));
+		}
+		let writes_links = equations.writes_links();
+		self.pending_labels.push(name);
+		if !writes_links {
+			return None;
+		}
+		let mut anchor = String::from("<mspace id=\"");
+		push_escaped_attribute(&mut anchor, name);
+		// The anchor is on the baseline, which would leave the formula above a jump's position.
+		anchor.push_str("\" style=\"scroll-margin-top:5em\"/>");
+		Some(Atom::new(anchor))
+	}
+
+	/// `\genfrac` after its name: delimiters, line thickness, style, numerator and denominator.
+	fn general_fraction(&mut self) -> String {
+		let open = self.delimiter_argument();
+		let close = self.delimiter_argument();
+		let thickness = css_length(self.raw_argument().unwrap_or("").trim());
+		let style = self.raw_argument().unwrap_or("").trim();
+		let style_index =
+			style.parse::<usize>().ok().filter(|index| *index < STYLE_ATTRIBUTES.len());
+		let thickness = thickness.map_or_else(String::new, |thickness| {
+			let thickness = scaled_line_thickness(&thickness, style_index.unwrap_or(0));
+			format!(" linethickness=\"{thickness}\"")
+		});
+		let is_display = style_index.map_or(self.is_display, |index| index == 0);
+		let numerator = self.with_display(is_display, Self::argument);
+		let denominator = self.with_display(is_display, Self::argument);
+		let fraction = format!("<mfrac{thickness}>{numerator}{denominator}</mfrac>");
+		let with_fences = match open.is_empty() && close.is_empty() {
+			true => fraction,
+			false => {
+				format!(
+					"<mrow>{}{fraction}{}</mrow>",
+					self.tall_fence(open),
+					self.tall_fence(close)
+				)
+			}
+		};
+		match style_index {
+			Some(index) => format!("<mstyle {}>{with_fences}</mstyle>", STYLE_ATTRIBUTES[index]),
+			None => with_fences,
+		}
+	}
+
+	/// A delimiter alone or in a group, where `{}` is none.
+	fn delimiter_argument(&mut self) -> &'static str {
+		if self.peek_token() != Some(Token::BeginGroup) {
+			return self.delimiter().unwrap_or("");
+		}
+		self.next_token();
+		let delimiter = self.delimiter().unwrap_or("");
+		if self.peek_token() == Some(Token::EndGroup) {
+			self.next_token();
+		} else {
+			self.fail_expected("}");
+		}
+		delimiter
+	}
+
+	/// `\substack{…}`: rows like those of an environment, in the size of scripts.
+	fn substack(&mut self) -> String {
+		if self.peek_token() != Some(Token::BeginGroup) {
+			self.fail_expected("group");
+			return "<mrow></mrow>".to_owned();
+		}
+		self.next_token();
+		if !self.enter() {
+			return error_text("…");
+		}
+		let rows =
+			self.with_display(false, |converter| converter.rows(RowsEnd::Group, RowNumbers::None));
+		self.leave();
+		if self.peek_token() == Some(Token::EndGroup) {
+			self.next_token();
+		} else {
+			self.fail_expected("}");
+		}
+		if rows.cells.iter().any(|row| row.len() > 1) && self.first_error.is_none() {
+			self.first_error = Some("{subarray} can contain only one column".to_owned());
+		}
+		let mut mathml = String::from(
+			"<mstyle scriptlevel=\"1\"><mtable rowspacing=\"0.1em\" columnalign=\"center\" columnspacing=\"1em\">",
+		);
+		for row in &rows.cells {
+			mathml.push_str("<mtr>");
+			for cell in row {
+				mathml.push_str(&format!(
+					"<mtd><mstyle scriptlevel=\"1\" displaystyle=\"false\">{cell}</mstyle></mtd>"
+				));
+			}
+			mathml.push_str("</mtr>");
+		}
+		mathml.push_str("</mtable></mstyle>");
+		mathml
+	}
+
+	/// `\rule[raise]{width}{height}`
+	fn rule(&mut self) -> String {
+		let raise = self.raw_optional_bracket().and_then(|raise| css_length(raise.trim()));
+		let width = self.dimension().unwrap_or_else(|| "0em".to_owned());
+		let height = self.dimension().unwrap_or_else(|| "0em".to_owned());
+		let raise_or_zero = raise.as_deref().unwrap_or("0em");
+		match self.follows_katex {
+			// KaTeX's box has the height of the raise only, so the rule overflows it. Browsers
+			// refuse a negative height, which then is that of the rule.
+			true => {
+				let depth = raise_or_zero
+					.strip_prefix('-')
+					.map_or_else(String::new, |depth| format!(" depth=\"{depth}\""));
+				format!(
+					"<mpadded height=\"{raise_or_zero}\"{depth} voffset=\"{raise_or_zero}\"><mspace mathbackground=\"black\" width=\"{width}\" height=\"{height}\"/></mpadded>"
+				)
+			}
+			false => format!(
+				"<mpadded voffset=\"{raise_or_zero}\"><mspace mathbackground=\"currentColor\" width=\"{width}\" height=\"{height}\"/></mpadded>"
+			),
+		}
+	}
+
+	/// `\llap`, `\rlap`, `\clap` and their math forms: no width, the content to the left of the
+	/// position, to its right or around it.
+	fn overlap(&self, name: &str, content: &str) -> String {
+		let shift = match name.trim_start_matches("math") {
+			"llap" => Some(("-1width", "-100%")),
+			"clap" => Some(("-0.5width", "-50%")),
+			_ => None,
+		};
+		match (shift, self.follows_katex) {
+			(None, _) => format!("<mpadded width=\"0px\">{content}</mpadded>"),
+			// Browsers refuse the unit `width`, so the content stays to the right.
+			(Some((lspace, _)), true) => {
+				format!("<mpadded lspace=\"{lspace}\" width=\"0px\">{content}</mpadded>")
+			}
+			(Some((_, shift)), false) => format!(
+				"<mpadded width=\"0px\"><mrow style=\"transform:translateX({shift})\">{content}</mrow></mpadded>"
+			),
+		}
+	}
+
+	/// The rows of `CD`, whose name was read, with arrows in cells of their own.
+	fn commutative_diagram(&mut self) -> String {
+		if !self.enter() {
+			return error_text("…");
+		}
+		let outer_display = std::mem::replace(&mut self.is_display, true);
+		let mut cells = Vec::new();
+		loop {
+			let mut row = Vec::new();
+			let mut cell = self.sequence(Context::CommutativeCell);
+			while self.peek_token() == Some(Token::Character('@')) {
+				self.next_token();
+				row.push(std::mem::take(&mut cell));
+				row.push(self.commutative_arrow());
+				cell = self.sequence(Context::CommutativeCell);
+			}
+			// A row of vertical arrows has its first arrow in the first column.
+			if cells.len() % 2 == 0 {
+				row.push(cell);
+			} else if !row.is_empty() {
+				row.remove(0);
+			}
+			cells.push(row);
+			match self.peek_token() {
+				Some(Token::Alignment | LINE_BREAK | Token::Command("cr" | "newline")) => {
+					self.next_token();
+				}
+				Some(Token::Command("end")) | None => break,
+				Some(_) => {
+					self.fail_expected("\\\\ or \\cr or \\end");
+					self.next_token();
+				}
+			}
+		}
+		self.is_display = outer_display;
+		self.leave();
+		if cells.len() > 1 && cells.last().is_some_and(|row| row.iter().all(String::is_empty)) {
+			cells.pop();
+		}
+		if self.peek_token() == Some(Token::Command("end")) {
+			self.next_token();
+			self.raw_argument();
+		}
+		let numbers = cells.iter().map(|_| None).collect();
+		table(&Rows { cells, numbers }, &[], ColumnAlignment::Center, true)
+	}
+
+	/// An arrow of `CD` whose `@` was read.
+	fn commutative_arrow(&mut self) -> String {
+		let start = self.position;
+		let kind = match self.peek_token() {
+			Some(Token::Character(kind)) if "<>AV=|.".contains(kind) => kind,
+			_ => {
+				self.next_token();
+				let end = self.position;
+				self.fail("Expected one of \"<>AV=|.\" after @", start, end);
+				return String::new();
+			}
+		};
+		self.next_token();
+		match kind {
+			'=' => "<mo stretchy=\"true\">=</mo>".to_owned(),
+			'|' => big_arrow(if self.follows_katex { "∥" } else { "‖" }),
+			'.' => String::new(),
+			_ => {
+				let first = self.commutative_label(kind, start);
+				let second = self.commutative_label(kind, start);
+				match kind {
+					'>' | '<' => {
+						let arrow = if kind == '>' { "→" } else { "←" };
+						format!(
+							"<munderover><mo stretchy=\"true\">{arrow}</mo>{}{}</munderover>",
+							wide_label(&second),
+							wide_label(&first)
+						)
+					}
+					_ => format!(
+						"<mrow><mstyle {style}>{first}</mstyle>{}<mstyle {style}>{second}</mstyle></mrow>",
+						big_arrow(if kind == 'V' { "↓" } else { "↑" }),
+						style = "scriptlevel=\"1\" displaystyle=\"false\""
+					),
+				}
+			}
+		}
+	}
+
+	/// A label of a `CD` arrow up to its closing character.
+	fn commutative_label(&mut self, end: char, arrow_start: usize) -> String {
+		let label = self.with_display(false, |converter| {
+			converter.nested_sequence(Context::CommutativeLabel(end))
+		});
+		if self.peek_token() == Some(Token::Character(end)) {
+			self.next_token();
+		} else {
+			let message = format!("Missing a {end} character to complete a CD arrow.");
+			self.fail(&message, arrow_start, arrow_start + end.len_utf8());
+		}
+		label
+	}
+
 	fn accent_or_symbol(&mut self, name: &str) -> Atom {
 		let Some((character, position, is_stretchy)) = accent(name) else {
+			if symbol(name).is_none() {
+				let end = self.position;
+				let message = format!("Undefined control sequence: \\{name}");
+				self.fail(&message, end.saturating_sub(name.len() + 1), end);
+			}
+			if self.follows_katex {
+				match (name, symbol(name)) {
+					("vert" | "lvert" | "rvert", _) => {
+						return Atom::new(upright_identifier("∣"));
+					}
+					("Vert" | "lVert" | "rVert", _) => {
+						return Atom::new(upright_identifier("∥"));
+					}
+					("vdots", _) => return Atom::new(upright_identifier("⋮")),
+					(_, Some(Symbol::Space(width))) => return Atom::new(self.space(width)),
+					_ => {}
+				}
+			}
 			return symbol_atom(name);
 		};
 		let base = self.argument();
-		let accent = format!("<mo stretchy=\"{is_stretchy}\">{character}</mo>");
-		let mathml = match position {
-			AccentPosition::Over => format!("<mover accent=\"true\">{base}{accent}</mover>"),
-			AccentPosition::Under => {
+		let is_brace = matches!(name, "overbrace" | "underbrace");
+		let accent = match (self.follows_katex, is_stretchy) {
+			(true, false) => format!("<mo>{}</mo>", katex_accent(name, character)),
+			_ => format!("<mo stretchy=\"{is_stretchy}\">{character}</mo>"),
+		};
+		// KaTeX's braces are scripts in the size of scripts, no accents.
+		let is_accent = !(self.follows_katex && is_brace);
+		let mathml = match (position, is_accent) {
+			(AccentPosition::Over, true) => {
+				format!("<mover accent=\"true\">{base}{accent}</mover>")
+			}
+			(AccentPosition::Over, false) => format!("<mover>{base}{accent}</mover>"),
+			(AccentPosition::Under, true) => {
 				format!("<munder accentunder=\"true\">{base}{accent}</munder>")
 			}
+			(AccentPosition::Under, false) => format!("<munder>{base}{accent}</munder>"),
 		};
-		let limits = match name {
-			"overbrace" | "underbrace" => Limits::Always,
-			_ => Limits::Never,
-		};
+		let limits = if is_brace { Limits::Always } else { Limits::Never };
 		Atom { mathml, limits }
+	}
+
+	/// A space: KaTeX's `SpaceNode` writes some widths as Unicode spaces in text.
+	fn space(&self, width: &str) -> String {
+		if self.follows_katex {
+			let text = match width {
+				"0.0556em" => Some("\u{200a}"),
+				"0.1667em" => Some("\u{2009}"),
+				"0.2222em" => Some("\u{2005}"),
+				"0.2778em" => Some("\u{2005}\u{200a}"),
+				"-0.0556em" => Some("\u{200a}\u{2063}"),
+				"-0.1667em" => Some("\u{2009}\u{2063}"),
+				"-0.2222em" => Some("\u{205f}\u{2063}"),
+				"-0.2778em" => Some("\u{2005}\u{2063}"),
+				"0.25em" => Some("\u{a0}"),
+				_ => None,
+			};
+			if let Some(text) = text {
+				return format!("<mtext>{text}</mtext>");
+			}
+		}
+		space(width)
 	}
 
 	/// Sub- and superscripts and primes following `atom`.
@@ -671,12 +1367,16 @@ impl<'a> Converter<'a> {
 				}
 				Some(Token::Superscript) if superscript.is_none() => {
 					self.next_token();
-					superscript = Some(self.argument());
+					self.check_script_argument("^");
+					superscript = Some(self.with_display(false, Self::argument));
 				}
 				Some(Token::Subscript) if subscript.is_none() => {
 					self.next_token();
-					subscript = Some(self.argument());
+					self.check_script_argument("_");
+					subscript = Some(self.with_display(false, Self::argument));
 				}
+				Some(Token::Superscript) => self.fail_double_script("superscript"),
+				Some(Token::Subscript) => self.fail_double_script("subscript"),
 				Some(Token::Command("limits")) => {
 					self.next_token();
 					limits = Limits::Always;
@@ -697,6 +1397,13 @@ impl<'a> Converter<'a> {
 		}
 		let base = match atom.mathml.is_empty() {
 			true => "<mrow></mrow>".to_owned(),
+			// A function name is two elements, of which a script has only one base.
+			false
+				if atom.mathml.ends_with(FUNCTION_APPLICATION)
+					&& (subscript.is_some() || superscript.is_some()) =>
+			{
+				format!("<mrow>{}</mrow>", atom.mathml)
+			}
 			false => atom.mathml,
 		};
 		let as_limits = match limits {
@@ -718,8 +1425,44 @@ impl<'a> Converter<'a> {
 		}
 	}
 
+	/// Notes a script without an argument, whose sign was just read.
+	fn check_script_argument(&mut self, sign: &str) {
+		if matches!(
+			self.peek_token(),
+			Some(
+				Token::EndGroup
+					| Token::Alignment
+					| LINE_BREAK | Token::Superscript
+					| Token::Subscript
+					| Token::Command("end" | "right"),
+			) | None
+		) {
+			let end = self.position;
+			let message = format!("Expected group after '{sign}'");
+			self.fail(&message, end - sign.len(), end);
+		}
+	}
+
+	/// Notes a second script of the same kind, which is the next token and is dropped.
+	fn fail_double_script(&mut self, kind: &str) {
+		self.skip_whitespace_and_comments();
+		let start = self.position;
+		self.fail(&format!("Double {kind}"), start, start + 1);
+		self.next_token();
+		self.argument();
+	}
+
+	/// A delimiter after `\\left` or `\\right`.
+	fn stretchy_delimiter(&mut self) -> &'a str {
+		let delimiter = self.delimiter().unwrap_or("");
+		match self.follows_katex {
+			true => katex_delimiter(delimiter),
+			false => delimiter,
+		}
+	}
+
 	fn left_right(&mut self) -> String {
-		let open = self.delimiter().unwrap_or("");
+		let open = self.stretchy_delimiter();
 		if !self.enter() {
 			return error_text("…");
 		}
@@ -728,11 +1471,26 @@ impl<'a> Converter<'a> {
 		let close = match self.peek_token() {
 			Some(Token::Command("right")) => {
 				self.next_token();
-				self.delimiter().unwrap_or("")
+				self.stretchy_delimiter()
 			}
-			_ => "",
+			_ => {
+				self.fail_expected("\\right");
+				""
+			}
 		};
-		format!("<mrow>{}{content}{}</mrow>", fence(open, true), fence(close, true))
+		format!("<mrow>{}{content}{}</mrow>", self.tall_fence(open), self.tall_fence(close))
+	}
+
+	/// A delimiter that should grow. KaTeX leaves it to the operator dictionary, which does not
+	/// let `∣` and `∥` grow.
+	fn tall_fence(&self, delimiter: &str) -> String {
+		if !self.follows_katex || delimiter.is_empty() {
+			return fence(delimiter, true);
+		}
+		let mut mathml = String::from("<mo fence=\"true\">");
+		push_escaped_text(&mut mathml, delimiter);
+		mathml.push_str("</mo>");
+		mathml
 	}
 
 	/// The delimiter after `\left`, `\right`, `\big` and so on and `""` for `.`.
@@ -756,7 +1514,13 @@ impl<'a> Converter<'a> {
 				'|' => "‖",
 				_ => return None,
 			},
-			Token::Command(name) => delimiter_command(name)?,
+			Token::Command(name) => {
+				let is_corner = matches!(name, "ulcorner" | "urcorner" | "llcorner" | "lrcorner");
+				if is_corner && self.follows_katex && self.first_error.is_none() {
+					self.first_error = Some("Invalid delimiter type 'htmlmathml'".to_owned());
+				}
+				delimiter_command(name)?
+			}
 			_ => return None,
 		};
 		self.next_token();
@@ -779,7 +1543,16 @@ impl<'a> Converter<'a> {
 	}
 
 	fn environment(&mut self) -> String {
+		self.skip_whitespace_and_comments();
+		let name_start = self.position;
 		let name = self.raw_argument().unwrap_or("").trim();
+		if !is_known_environment(name) {
+			let message = format!("No such environment: {name}");
+			self.fail(&message, name_start, self.position);
+		}
+		if name == "CD" {
+			return self.commutative_diagram();
+		}
 		let (open, close, alignment, is_display_style) = match name {
 			"pmatrix" | "pmatrix*" => ("(", ")", ColumnAlignment::Center, false),
 			"bmatrix" | "bmatrix*" => ("[", "]", ColumnAlignment::Center, false),
@@ -788,6 +1561,7 @@ impl<'a> Converter<'a> {
 			"Vmatrix" | "Vmatrix*" => ("‖", "‖", ColumnAlignment::Center, false),
 			"cases" | "dcases" => ("{", "", ColumnAlignment::Left, name == "dcases"),
 			"rcases" => ("", "}", ColumnAlignment::Left, false),
+			"drcases" => ("", "}", ColumnAlignment::Left, true),
 			"aligned" | "align" | "align*" | "split" | "eqnarray" | "eqnarray*" | "alignat"
 			| "alignat*" | "alignedat" | "flalign" | "flalign*" => {
 				("", "", ColumnAlignment::RightLeft, true)
@@ -807,7 +1581,21 @@ impl<'a> Converter<'a> {
 		if !self.enter() {
 			return error_text("…");
 		}
-		let rows = self.rows(true);
+		let numbers_rows = is_numbered_environment(name)
+			&& self.is_display_formula
+			&& !self.is_in_numbered_rows
+			&& (self.equations.is_some() || self.follows_katex);
+		let row_numbers = match (numbers_rows, name.ends_with('*')) {
+			(false, _) => RowNumbers::None,
+			(true, true) => RowNumbers::Tags,
+			(true, false) => RowNumbers::TagsAndLabels,
+		};
+		let outer_is_numbered = self.is_in_numbered_rows;
+		self.is_in_numbered_rows |= numbers_rows;
+		let rows = self.with_display(is_display_style, |converter| {
+			converter.rows(RowsEnd::Environment, row_numbers)
+		});
+		self.is_in_numbered_rows = outer_is_numbered;
 		self.leave();
 		if self.peek_token() == Some(Token::Command("end")) {
 			self.next_token();
@@ -816,7 +1604,13 @@ impl<'a> Converter<'a> {
 		let table = table(&rows, &column_alignments, alignment, is_display_style);
 		match (open, close) {
 			("", "") => table,
-			_ => format!("<mrow>{}{table}{}</mrow>", fence(open, true), fence(close, true)),
+			_ => {
+				let (open, close) = match self.follows_katex {
+					true => (katex_delimiter(open), katex_delimiter(close)),
+					false => (open, close),
+				};
+				format!("<mrow>{}{table}{}</mrow>", self.tall_fence(open), self.tall_fence(close))
+			}
 		}
 	}
 
@@ -849,6 +1643,16 @@ impl<'a> Converter<'a> {
 		}
 		self.position = self.source.len();
 		Some(group)
+	}
+
+	/// The text in `[...]` if it follows.
+	fn raw_optional_bracket(&mut self) -> Option<&'a str> {
+		self.skip_whitespace_and_comments();
+		let rest = self.rest();
+		let inner = rest.strip_prefix('[')?;
+		let end = inner.find(']')?;
+		self.position += end + 2;
+		Some(&inner[..end])
 	}
 
 	/// The math in `[...]` if it follows, e.g. the index of `\sqrt[3]{x}`.
@@ -895,6 +1699,202 @@ impl<'a> Converter<'a> {
 	}
 }
 
+/// Whether `name` is written by a command: what `\newcommand` must not redefine, unlike `\renewcommand`.
+fn is_known_command(name: &str) -> bool {
+	const STRUCTURAL_COMMANDS: [&str; 96] = [
+		"above",
+		"allowbreak",
+		"atop",
+		"begin",
+		"bf",
+		"big",
+		"Big",
+		"bigg",
+		"Bigg",
+		"biggl",
+		"Biggl",
+		"biggm",
+		"Biggm",
+		"biggr",
+		"Biggr",
+		"bigl",
+		"Bigl",
+		"bigm",
+		"Bigm",
+		"bigr",
+		"Bigr",
+		"binom",
+		"bm",
+		"boxed",
+		"boldsymbol",
+		"brace",
+		"brack",
+		"cal",
+		"cancel",
+		"bcancel",
+		"cfrac",
+		"choose",
+		"clap",
+		"color",
+		"colorbox",
+		"dbinom",
+		"dfrac",
+		"displaylimits",
+		"displaystyle",
+		"emph",
+		"end",
+		"fbox",
+		"fcolorbox",
+		"frac",
+		"genfrac",
+		"hbox",
+		"href",
+		"hphantom",
+		"hskip",
+		"hspace",
+		"it",
+		"kern",
+		"left",
+		"limits",
+		"llap",
+		"mathbb",
+		"mathbf",
+		"mathcal",
+		"mathclap",
+		"mathfrak",
+		"mathit",
+		"mathllap",
+		"mathrlap",
+		"mathrm",
+		"mathsf",
+		"mathtt",
+		"mbox",
+		"mkern",
+		"mod",
+		"mskip",
+		"mspace",
+		"nolimits",
+		"nonumber",
+		"not",
+		"notag",
+		"operatorname",
+		"over",
+		"overset",
+		"phantom",
+		"pmod",
+		"raisebox",
+		"relax",
+		"right",
+		"rlap",
+		"rm",
+		"rule",
+		"sf",
+		"smash",
+		"sqrt",
+		"stackrel",
+		"substack",
+		"tag",
+		"text",
+		"textcolor",
+		"underset",
+		"vphantom",
+	];
+	STRUCTURAL_COMMANDS.contains(&name)
+		|| symbol(name).is_some()
+		|| accent(name).is_some()
+		|| delimiter_command(name).is_some()
+}
+
+/// The environments that number their rows in LaTeX, starred or not.
+fn is_numbered_environment(name: &str) -> bool {
+	matches!(
+		name.trim_end_matches('*'),
+		"align" | "alignat" | "gather" | "equation" | "multline" | "flalign" | "eqnarray"
+	)
+}
+
+/// The environments of the match in [`Converter::environment`], with the plain ones.
+fn is_known_environment(name: &str) -> bool {
+	matches!(
+		name,
+		"CD" | "drcases"
+			| "pmatrix"
+			| "pmatrix*"
+			| "bmatrix"
+			| "bmatrix*"
+			| "Bmatrix"
+			| "Bmatrix*"
+			| "vmatrix"
+			| "vmatrix*"
+			| "Vmatrix"
+			| "Vmatrix*"
+			| "matrix"
+			| "matrix*"
+			| "smallmatrix"
+			| "cases" | "dcases"
+			| "rcases"
+			| "aligned"
+			| "align" | "align*"
+			| "split" | "eqnarray"
+			| "eqnarray*"
+			| "alignat"
+			| "alignat*"
+			| "alignedat"
+			| "flalign"
+			| "flalign*"
+			| "gathered"
+			| "gather"
+			| "gather*"
+			| "multline"
+			| "multline*"
+			| "equation"
+			| "equation*"
+			| "array" | "darray"
+			| "subarray"
+	)
+}
+
+fn upright_identifier(identifier: &str) -> String {
+	let mut mathml = String::from("<mi mathvariant=\"normal\">");
+	push_escaped_text(&mut mathml, identifier);
+	mathml.push_str("</mi>");
+	mathml
+}
+
+/// The character KaTeX writes for a delimiter.
+fn katex_delimiter(delimiter: &str) -> &str {
+	match delimiter {
+		"|" => "∣",
+		"‖" => "∥",
+		other => other,
+	}
+}
+
+/// The character KaTeX writes for an accent that does not stretch.
+fn katex_accent(name: &str, character: &'static str) -> &'static str {
+	match name {
+		"vec" => "\u{20d7}",
+		"bar" => "\u{2c9}",
+		"acute" => "\u{2ca}",
+		"grave" => "\u{2cb}",
+		_ => character,
+	}
+}
+
+/// A token as written in the source, for error messages.
+fn token_text(token: Token) -> String {
+	match token {
+		Token::Command(name) => format!("\\{name}"),
+		Token::ControlSymbol(symbol) => format!("\\{symbol}"),
+		Token::Character(character) => character.to_string(),
+		Token::BeginGroup => "{".to_owned(),
+		Token::EndGroup => "}".to_owned(),
+		Token::Superscript => "^".to_owned(),
+		Token::Subscript => "_".to_owned(),
+		Token::Alignment => "&".to_owned(),
+	}
+}
+
 fn symbol_atom(name: &str) -> Atom {
 	let Some(symbol) = symbol(name) else {
 		return Atom::new(error_text(&format!("\\{name}")));
@@ -916,6 +1916,7 @@ fn symbol_atom(name: &str) -> Atom {
 			Atom { mathml: format!("<mi>{function}</mi>"), limits: Limits::InDisplay }
 		}
 		Symbol::Space(width) => Atom::new(space(width)),
+		Symbol::Delimiter(delimiter) => Atom::new(fence(delimiter, false)),
 	}
 }
 
@@ -982,17 +1983,34 @@ fn array_column_alignments(specification: &str) -> Vec<&'static str> {
 }
 
 fn table(
-	rows: &[Vec<String>],
+	rows: &Rows,
 	column_alignments: &[&str],
 	alignment: ColumnAlignment,
 	is_display_style: bool,
 ) -> String {
-	let mut mathml = String::from(match is_display_style {
-		true => "<mtable displaystyle=\"true\">",
-		false => "<mtable>",
+	const SPACE_CELL: &str = "<mtd style=\"width:50%\"></mtd>";
+	// A number that is drawn makes the table as wide as the line, with spaces on both sides of the
+	// cells. A hidden copy on the left keeps the cells in the middle of the line, as browsers lay
+	// out the content of cells as math, which `text-align` does not move to the end of a space.
+	// KaTeX's MathML has the spaces and an empty cell for the number.
+	let is_wide = rows.numbers.iter().flatten().any(|number| !number.is_empty());
+	let mut mathml = String::from(match (is_display_style, is_wide) {
+		(true, true) => "<mtable displaystyle=\"true\" style=\"width:100%\">",
+		(true, false) => "<mtable displaystyle=\"true\">",
+		(false, _) => "<mtable>",
 	});
-	for row in rows {
+	for (row_index, row) in rows.cells.iter().enumerate() {
+		let number = rows.numbers.get(row_index).and_then(Option::as_deref);
 		mathml.push_str("<mtr>");
+		if is_wide {
+			// EdgeHTML has no `mphantom` and takes the style only on the text itself.
+			let hidden =
+				number.unwrap_or("").replacen("<mtext>", "<mtext style=\"visibility:hidden\">", 1);
+			mathml.push_str(&format!("<mtd><mphantom>{hidden}</mphantom></mtd>"));
+		}
+		if number.is_some() || is_wide {
+			mathml.push_str(SPACE_CELL);
+		}
 		for (column, cell) in row.iter().enumerate() {
 			let (align, padding) = match (column_alignments.get(column), alignment) {
 				(Some(align), _) => (*align, ""),
@@ -1006,6 +2024,10 @@ fn table(
 			mathml.push_str(&format!(
 				"<mtd columnalign=\"{align}\" style=\"text-align:{align}{padding}\">{cell}</mtd>"
 			));
+		}
+		if number.is_some() || is_wide {
+			mathml.push_str(SPACE_CELL);
+			mathml.push_str(&format!("<mtd>{}</mtd>", number.unwrap_or("")));
 		}
 		mathml.push_str("</mtr>");
 	}
@@ -1054,8 +2076,8 @@ fn space(width: &str) -> String {
 	format!("<mspace width=\"{width}\"/>")
 }
 
-/// `\text{...}` content. Leading and trailing spaces are kept as no-break spaces.
-fn text_element(text: &str, attributes: &str) -> String {
+/// The text of `\text{...}` without its markup.
+fn plain_text(text: &str) -> String {
 	let mut plain = String::with_capacity(text.len());
 	let mut characters = text.chars();
 	while let Some(character) = characters.next() {
@@ -1069,6 +2091,12 @@ fn text_element(text: &str, attributes: &str) -> String {
 			_ => plain.push(character),
 		}
 	}
+	plain
+}
+
+/// `\text{...}` content. Leading and trailing spaces are kept as no-break spaces.
+fn text_element(text: &str, attributes: &str) -> String {
+	let plain = plain_text(text);
 	let trimmed = plain.trim();
 	let mut mathml = format!("<mtext{attributes}>");
 	if plain.starts_with(char::is_whitespace) {
@@ -1089,15 +2117,93 @@ fn error_text(text: &str) -> String {
 	mathml
 }
 
-fn with_color(color: &str, content: &str) -> String {
+/// `color` if it can be written into attributes.
+fn valid_color(color: &str) -> Option<&str> {
 	let color = color.trim();
 	let is_valid = !color.is_empty()
 		&& color.len() <= 32
 		&& color.chars().all(|character| character.is_ascii_alphanumeric() || character == '#');
-	match is_valid {
-		true => format!("<mstyle mathcolor=\"{color}\" style=\"color:{color}\">{content}</mstyle>"),
-		false => content.to_owned(),
+	is_valid.then_some(color)
+}
+
+fn with_color(color: &str, content: &str) -> String {
+	match valid_color(color) {
+		Some(color) => {
+			format!("<mstyle mathcolor=\"{color}\" style=\"color:{color}\">{content}</mstyle>")
+		}
+		None => content.to_owned(),
 	}
+}
+
+/// `\colorbox` and `\fcolorbox`. KaTeX's `width="+6pt"` is 6 points in browsers, which leaves the
+/// text outside of its background, so the padding is written as such.
+fn color_box(frame: Option<&str>, background: Option<&str>, text: &str) -> String {
+	let border = frame.map_or_else(String::new, |frame| format!(";border:0.04em solid {frame}"));
+	let background = background
+		.map_or_else(String::new, |background| format!(" mathbackground=\"{background}\""));
+	format!(
+		"<mpadded{background} style=\"padding:3pt{border}\"><mstyle {}>{text}</mstyle></mpadded>",
+		STYLE_ATTRIBUTES[1]
+	)
+}
+
+/// A line across a box as a CSS background, `direction` across the line.
+fn strike_line(direction: &str) -> String {
+	format!(
+		"linear-gradient({direction},transparent calc(50% - 0.6px),currentColor calc(50% - 0.6px),currentColor calc(50% + 0.6px),transparent calc(50% + 0.6px))"
+	)
+}
+
+/// The line thickness of a fraction: KaTeX writes a point as 0.1 em.
+fn line_thickness(css_length: &str) -> String {
+	scaled_line_thickness(css_length, 0)
+}
+
+/// [`line_thickness`] for a style of `\genfrac`, in whose font size KaTeX expresses the length.
+fn scaled_line_thickness(css_length: &str, style_index: usize) -> String {
+	let ten_thousandths = match (css_length.strip_suffix("em"), css_length.strip_suffix("pt")) {
+		(Some(em), _) => thousandths_of(em).map(|thousandths| thousandths * 10),
+		(_, Some(points)) => thousandths_of(points),
+		_ => None,
+	};
+	let Some(ten_thousandths) = ten_thousandths else {
+		return css_length.to_owned();
+	};
+	let scaled = match style_index {
+		2 => ten_thousandths * 10 / 7,
+		3 => ten_thousandths * 2,
+		_ => ten_thousandths,
+	};
+	let sign = if scaled < 0 { "-" } else { "" };
+	let magnitude = scaled.unsigned_abs();
+	format!("{sign}{}.{:04}em", magnitude / 10_000, magnitude % 10_000)
+}
+
+/// The character of an `\xrightarrow` and the like.
+fn extensible_arrow(name: &str) -> &'static str {
+	match name {
+		"xrightarrow" => "→",
+		"xleftarrow" => "←",
+		"xleftrightarrow" => "↔",
+		"xRightarrow" => "⇒",
+		"xLeftarrow" => "⇐",
+		"xLeftrightarrow" => "⇔",
+		"xmapsto" => "↦",
+		"xhookrightarrow" => "↪",
+		"xhookleftarrow" => "↩",
+		"xrightleftharpoons" => "⇌",
+		_ => "=",
+	}
+}
+
+/// A vertical arrow of `CD`, as tall as `\Big`.
+fn big_arrow(arrow: &str) -> String {
+	format!("<mo fence=\"true\" stretchy=\"true\" minsize=\"1.8em\" maxsize=\"1.8em\">{arrow}</mo>")
+}
+
+/// A label of a horizontal arrow of `CD`, with some room, as browsers ignore `minsize` there.
+fn wide_label(label: &str) -> String {
+	format!("<mrow><mspace width=\"1em\"/>{label}<mspace width=\"1em\"/></mrow>")
 }
 
 /// Latin letters and digits from the Mathematical Alphanumeric Symbols block, which shows the
@@ -1159,7 +2265,7 @@ mod tests {
 
 	fn math(latex: &str) -> String {
 		let mut output = String::new();
-		push_math(&mut output, latex, false);
+		push_math(&mut output, latex, false, &mut Equations::new(true));
 		output
 			.strip_prefix("<math xmlns=\"http://www.w3.org/1998/Math/MathML\">")
 			.and_then(|inner| inner.strip_suffix("</math>"))
@@ -1169,8 +2275,21 @@ mod tests {
 
 	fn display_math(latex: &str) -> String {
 		let mut output = String::new();
-		push_math(&mut output, latex, true);
+		push_math(&mut output, latex, true, &mut Equations::new(true));
 		output
+	}
+
+	/// The formulas of a document, each as display math.
+	fn document(formulas: &[&str], writes_links: bool) -> Vec<String> {
+		let mut equations = Equations::new(writes_links);
+		let separator = "\n";
+		let mut output = String::new();
+		for formula in formulas {
+			push_math(&mut output, formula, true, &mut equations);
+			output.push_str(separator);
+		}
+		equations.resolve_references(&mut output);
+		output.lines().map(str::to_owned).collect()
 	}
 
 	#[test]
@@ -1288,6 +2407,276 @@ mod tests {
 			assert_eq!(css_length(invalid), None, "{invalid}");
 		}
 		assert_eq!(math("\\kern1.5em x"), "<mspace width=\"1.500em\"/><mi>x</mi>");
+	}
+
+	#[test]
+	fn reports_the_first_error_like_katex() {
+		assert!(
+			latex_to_mathml("x^2+\\frac{1}{2}").is_ok_and(|mathml| mathml.starts_with("<math"))
+		);
+		for (latex, error) in [
+			(
+				"\\foo",
+				"Undefined control sequence: \\foo at position 1: \\\u{332}f\u{332}o\u{332}o\u{332}",
+			),
+			("x^", "Expected group after '^' at position 2: x^\u{332}"),
+			("{x", "Expected '}', got 'EOF' at end of input: {x"),
+			(
+				"\\frac{1}",
+				"Unexpected end of input in a macro argument, expected '}' at end of input: \\frac{1}",
+			),
+			("\\left( x", "Expected '\\right', got 'EOF' at end of input: \\left( x"),
+			(
+				"\\begin{foo}x\\end{foo}",
+				"No such environment: foo at position 7: \\begin{\u{332}f\u{332}o\u{332}o\u{332}}\u{332}x\\end{foo}",
+			),
+			("x}", "Expected 'EOF', got '}' at position 2: x}\u{332}"),
+			("x^1^2", "Double superscript at position 4: x^1^\u{332}2"),
+			("x&#35;2", "Expected 'EOF', got '&' at position 2: x&\u{332}#35;2"),
+		] {
+			assert_eq!(latex_to_mathml(latex).unwrap_err(), error, "{latex}");
+		}
+		let long = format!("{}\\foo{}", "a".repeat(20), "1".repeat(20));
+		let message = latex_to_mathml(&long).unwrap_err();
+		assert!(message.contains("at position 21: …aaaaaaaaaaaaaaa\\"), "{message}");
+		assert!(message.ends_with(&format!("{}…", "1".repeat(15))), "{message}");
+	}
+
+	#[test]
+	fn converts_the_commands_of_phase_7b() {
+		for (latex, expected) in [
+			("\\lesssim", "<mo>≲</mo>"),
+			("\\nvDash", "<mo>⊭</mo>"),
+			("\\coloneqq", "<mo>≔</mo>"),
+			("\\leadsto", "<mo>⇝</mo>"),
+			("\\oiiint", "<mo largeop=\"true\" movablelimits=\"false\">∰</mo>"),
+			("\\smallint", "<mo largeop=\"false\">∫</mo>"),
+			("\\complement", "<mi mathvariant=\"normal\">∁</mi>"),
+			("\\varGamma", "<mi>Γ</mi>"),
+			("\\S", "<mi mathvariant=\"normal\">§</mi>"),
+			("\\Bbb R", "<mi>ℝ</mi>"),
+			("\\bold x", "<mi>𝐱</mi>"),
+			("\\frak g", "<mi>𝔤</mi>"),
+			("\\sh", "<mi>sh</mi><mo>\u{2061}</mo>"),
+			("\\injlim", "<mi>inj\u{2009}lim</mi>"),
+			("\\lgroup", "<mo fence=\"true\" stretchy=\"false\">⟮</mo>"),
+			("\\pmb x", "<mstyle style=\"text-shadow: 0.02em 0.01em 0.04px\"><mi>x</mi></mstyle>"),
+			("\\smash x", "<mpadded height=\"0px\" depth=\"0px\"><mi>x</mi></mpadded>"),
+			("\\smash[t] x", "<mpadded height=\"0px\"><mi>x</mi></mpadded>"),
+			("\\rlap{x}", "<mpadded width=\"0px\"><mtext>x</mtext></mpadded>"),
+			(
+				"\\mathllap x",
+				"<mpadded width=\"0px\"><mrow style=\"transform:translateX(-100%)\"><mi>x</mi></mrow></mpadded>",
+			),
+			(
+				"\\hphantom x",
+				"<mpadded height=\"0px\" depth=\"0px\"><mphantom><mi>x</mi></mphantom></mpadded>",
+			),
+			("\\vphantom x", "<mpadded width=\"0px\"><mphantom><mi>x</mi></mphantom></mpadded>"),
+			(
+				"\\genfrac(]{0pt}{1}12",
+				"<mstyle displaystyle=\"false\" scriptlevel=\"0\"><mrow><mo fence=\"true\" stretchy=\"true\">(</mo><mfrac linethickness=\"0.0000em\"><mn>1</mn><mn>2</mn></mfrac><mo fence=\"true\" stretchy=\"true\">]</mo></mrow></mstyle>",
+			),
+			(
+				"\\genfrac{}{}{1pt}{}12",
+				"<mfrac linethickness=\"0.1000em\"><mn>1</mn><mn>2</mn></mfrac>",
+			),
+			(
+				"a\\above 1pt b",
+				"<mfrac linethickness=\"0.1000em\"><mrow><mi>a</mi></mrow><mrow><mi>b</mi></mrow></mfrac>",
+			),
+		] {
+			assert_eq!(math(latex), expected, "{latex}");
+		}
+		for latex in [
+			"\\xleftrightarrow{a}",
+			"\\xRightarrow[b]{a}",
+			"\\xlongequal{a}",
+			"\\utilde{x}",
+			"\\overgroup{x}",
+			"\\ddddot{x}",
+			"\\overlinesegment{x}",
+			"\\varlimsup_a",
+			"\\varliminf_a",
+			"\\left\\lmoustache x\\right\\rmoustache",
+			"\\raisebox{0.5em}{x}",
+			"\\rule{1em}{0.5em}",
+			"\\rule[0.2em]{1em}{0.5em}",
+			"\\colorbox{red}{x}",
+			"\\fcolorbox{red}{blue}{x}",
+			"\\sum_{\\substack{i\\\\j}}x",
+			"\\begin{drcases}a\\\\b\\end{drcases}",
+			"\\begin{CD}A@>a>>B\\\\@VbVV@VVcV\\\\C@=D\\end{CD}",
+			"\\begin{CD}A@<<<B@.C\\\\@AAA@|\\end{CD}",
+		] {
+			assert!(latex_to_mathml(latex).is_ok(), "{latex}: {:?}", latex_to_mathml(latex));
+			assert!(!math(latex).contains(ERROR_COLOR), "{latex}");
+		}
+		assert!(math("\\sideset{_a}{_b}\\sum").contains(ERROR_COLOR));
+		assert!(latex_to_mathml("\\sideset{_a}{_b}\\sum").is_err());
+	}
+
+	#[test]
+	fn writes_colors_and_lines_for_browsers() {
+		let frame = math("\\fcolorbox{red}{blue}{x}");
+		assert!(
+			frame.starts_with(
+				"<mpadded mathbackground=\"blue\" style=\"padding:3pt;border:0.04em solid red\">"
+			),
+			"{frame}"
+		);
+		assert!(!math("\\colorbox{\"x}{y}").contains("mathbackground"));
+		let cancel = math("\\cancel x");
+		assert!(
+			cancel.starts_with(
+				"<menclose notation=\"updiagonalstrike\" style=\"background:linear-gradient(to bottom right,"
+			),
+			"{cancel}"
+		);
+		assert_eq!(math("\\xcancel x").matches("linear-gradient").count(), 2);
+	}
+
+	#[test]
+	fn expands_macros_before_converting() {
+		assert_eq!(math("\\newcommand{\\a}[1]{#1^2}\\a{y}"), "<msup><mi>y</mi><mn>2</mn></msup>");
+		assert_eq!(math("\\def\\a{x}\\a"), "<mi>x</mi>");
+		assert_eq!(
+			latex_to_mathml("\\def\\a{x}\\a").as_deref(),
+			Ok("<math display=\"block\"><mi>x</mi></math>")
+		);
+		assert_eq!(
+			latex_to_mathml("\\def\\a{\\a}\\a").unwrap_err(),
+			"Too many expansions: infinite loop or need to increase maxExpand setting"
+		);
+		assert!(math("\\def\\a{\\a}\\a").contains(">\\a</mtext>"));
+		assert!(latex_to_mathml("\\newcommand{\\frac}{x}").is_err());
+		assert!(latex_to_mathml("\\renewcommand{\\frac}{x}").is_ok());
+	}
+
+	#[test]
+	fn links_formulas_with_href() {
+		let link = math("\\href{https://x.org/?a=\"b\"}{y}");
+		assert!(
+			link.starts_with(
+				"<mtext><a href=\"https://x.org/?a=&quot;b&quot;\"><math displaystyle=\"false\""
+			),
+			"{link}"
+		);
+		assert!(link.ends_with("><mrow><mi>y</mi></mrow></math></a></mtext>"), "{link}");
+		assert_eq!(math("\\href{javascript:x}{y}"), "<mrow><mi>y</mi></mrow>");
+		let mut office = String::new();
+		push_math(&mut office, "\\href{https://x.org}{y}", false, &mut Equations::new(false));
+		assert!(!office.contains("<a "), "{office}");
+		assert_eq!(
+			latex_to_mathml("\\href{https://x.org}{y}").as_deref(),
+			Ok(
+				"<math display=\"block\"><mrow href=\"https://x.org\"><mrow><mi>y</mi></mrow></mrow></math>"
+			)
+		);
+	}
+
+	#[test]
+	fn numbers_equations() {
+		let lines = document(
+			&[
+				"\\eqref{b} \\ref{a} \\ref{z}",
+				"x \\label{a}",
+				"y",
+				"\\begin{align}p &= q \\label{b}\\\\r &= s \\nonumber \\\\t &= u \\tag{A} \\label{c}\\end{align}",
+				"\\ref{c}",
+				"z \\tag*{Z} \\label{d}",
+				"\\eqref{d}",
+				"\\begin{equation*}w \\label{e}\\end{equation*}",
+				"\\ref{e}",
+			],
+			true,
+		);
+		assert!(lines[0].contains("<a href=\"#b\">(2)</a>"), "{}", lines[0]);
+		assert!(lines[0].contains("<a href=\"#a\">1</a>"), "{}", lines[0]);
+		assert!(lines[0].contains("color:#d1242f\">z</mtext>"), "{}", lines[0]);
+		assert!(
+			lines[1].contains("<mspace id=\"a\" style=\"scroll-margin-top:5em\"/>"),
+			"{}",
+			lines[1]
+		);
+		assert!(
+			lines[1].starts_with("<math display=\"block\" style=\"width:100%\""),
+			"{}",
+			lines[1]
+		);
+		assert!(lines[1].contains("<mtd><mtext>(1)</mtext></mtd>"), "{}", lines[1]);
+		assert!(!lines[2].contains("mtable"), "{}", lines[2]);
+		assert!(lines[3].contains("<mtd><mtext>(2)</mtext></mtd>"), "{}", lines[3]);
+		assert!(lines[3].contains("<mtd><mtext>(A)</mtext></mtd>"), "{}", lines[3]);
+		assert_eq!(lines[3].matches("<mtr>").count(), 3, "{}", lines[3]);
+		assert_eq!(lines[3].matches("<mtext>").count(), 2, "{}", lines[3]);
+		assert!(lines[4].contains(">A</a>"), "{}", lines[4]);
+		assert!(lines[5].contains("<mtd><mtext>Z</mtext></mtd>"), "{}", lines[5]);
+		assert!(lines[6].contains(">(Z)</a>"), "{}", lines[6]);
+		assert!(!lines[7].contains("(3)"), "{}", lines[7]);
+		assert!(lines[8].contains(">e</a>"), "{}", lines[8]);
+	}
+
+	#[test]
+	fn treats_inline_labels_and_tags_without_numbers() {
+		assert_eq!(
+			math("x\\label{a}"),
+			"<mi>x</mi><mspace id=\"a\" style=\"scroll-margin-top:5em\"/>"
+		);
+		assert_eq!(math("x\\tag{1}"), "<mi>x</mi>");
+		let duplicates = document(&["x\\label{a}", "y\\label{a}"], true);
+		assert!(duplicates[1].contains(">\\label{a}</mtext>"), "{}", duplicates[1]);
+		assert!(!duplicates[1].contains("(2)"), "{}", duplicates[1]);
+		let office = document(&["x\\label{a}", "\\eqref{a}"], false);
+		assert!(!office[0].contains("id="), "{}", office[0]);
+		assert!(office[0].contains("(1)"), "{}", office[0]);
+		assert!(office[1].contains("<mtext>(1)</mtext>"), "{}", office[1]);
+	}
+
+	#[test]
+	fn matches_katex_for_labels_and_tags() {
+		assert_eq!(
+			latex_to_mathml("x\\tag{1}").as_deref(),
+			Ok(
+				"<math display=\"block\"><mtable style=\"width:100%\"><mtr><mtd style=\"width:50%\"></mtd><mtd><mi>x</mi></mtd><mtd style=\"width:50%\"></mtd><mtd><mtext>(1)</mtext></mtd></mtr></mtable></math>"
+			)
+		);
+		assert!(
+			latex_to_mathml("x\\tag*{1}").is_ok_and(|mathml| mathml.contains("<mtext>1</mtext>"))
+		);
+		assert!(latex_to_mathml("x\\tag{1}\\tag{2}").is_err());
+		for latex in ["x\\label{a}", "\\ref{a}", "\\eqref{a}"] {
+			assert!(
+				latex_to_mathml(latex).unwrap_err().starts_with("Undefined control sequence"),
+				"{latex}"
+			);
+		}
+		assert_eq!(
+			latex_to_mathml("\\left\\ulcorner x\\right\\urcorner").unwrap_err(),
+			"Invalid delimiter type 'htmlmathml'"
+		);
+		assert_eq!(
+			latex_to_mathml("a\\\\b").as_deref(),
+			Ok("<math display=\"block\"><mrow><mi>a</mi><mspace/><mi>b</mi></mrow></math>")
+		);
+		assert_eq!(latex_to_mathml("x\\tag{1}\\tag{2}").unwrap_err(), "Multiple \\tag");
+		assert_eq!(
+			latex_to_mathml("\\sum_{\\substack{a&b}}").unwrap_err(),
+			"{subarray} can contain only one column"
+		);
+		assert!(
+			latex_to_mathml("\\genfrac{}{}{2em}{3}{a}{b}")
+				.is_ok_and(|mathml| mathml.contains("linethickness=\"4.0000em\""))
+		);
+		assert!(
+			latex_to_mathml("\\rule[-0.2em]{1em}{1em}")
+				.is_ok_and(|mathml| mathml.contains(" depth=\"0.200em\" "))
+		);
+		// The empty cells of KaTeX's numbered environments.
+		let aligned = latex_to_mathml("\\begin{align}a&=b\\end{align}").unwrap();
+		assert_eq!(aligned.matches("<mtd").count(), 5, "{aligned}");
+		let starred = latex_to_mathml("\\begin{align*}a&=b\\end{align*}").unwrap();
+		assert_eq!(starred.matches("<mtd").count(), 2, "{starred}");
 	}
 
 	#[test]
