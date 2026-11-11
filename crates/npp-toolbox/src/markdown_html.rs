@@ -6,7 +6,7 @@
 //! tables and highlighted code blocks.
 
 pub(crate) mod autolink;
-mod escape;
+pub(crate) mod escape;
 mod github_style;
 pub(crate) mod heading_anchor;
 mod math;

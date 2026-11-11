@@ -49,7 +49,7 @@ pub const MAX_EMBEDDED_IMAGE_BYTES: Setting = Setting {
 	key: "MaxEmbeddedImageBytes",
 	default: 10 * 1024 * 1024,
 	allowed: 0..=u32::MAX,
-	description: "Larger images stay linked. Internet images are never embedded.",
+	description: "Larger images stay linked, Paste Embedded Image refuses them. Internet images are never embedded.",
 };
 
 pub const HIGHLIGHT_CODE: Setting = Setting {
@@ -146,11 +146,12 @@ macro_rules! toolbar_setting {
 	};
 }
 
-pub const TOOLBAR_SETTINGS: [Setting; 7] = [
+pub const TOOLBAR_SETTINGS: [Setting; 8] = [
 	toolbar_setting!("RealignMarkdownTable", 1),
 	toolbar_setting!("CompactMarkdownTable", 0),
 	toolbar_setting!("Rewrap", 1),
 	toolbar_setting!("SelectComments", 0),
+	toolbar_setting!("PasteEmbeddedImage", 0),
 	toolbar_setting!("RenderHtml", 0),
 	toolbar_setting!("CopyAsHtml", 1),
 	toolbar_setting!("MarkdownViewer", 1),
@@ -176,7 +177,7 @@ pub fn toolbar_key(menu_name: &str) -> String {
 }
 
 /// All settings in the order of the settings file.
-pub const ALL: [&Setting; 21] = [
+pub const ALL: [&Setting; 22] = [
 	&MAX_LINE_WIDTH,
 	&EMBED_MARKDOWN_IMAGES,
 	&EMBED_HTML_IMAGES,
@@ -198,6 +199,7 @@ pub const ALL: [&Setting; 21] = [
 	&TOOLBAR_SETTINGS[4],
 	&TOOLBAR_SETTINGS[5],
 	&TOOLBAR_SETTINGS[6],
+	&TOOLBAR_SETTINGS[7],
 ];
 
 /// A new settings file with every setting at its default value and described.
@@ -247,6 +249,7 @@ mod tests {
 		assert_eq!(toolbar_key("Rewrap..."), "Rewrap");
 		assert!(toolbar_setting("Realign Markdown Table").is_some());
 		assert!(toolbar_setting("Compact Markdown Table").is_some());
+		assert!(toolbar_setting("Paste Embedded Image").is_some());
 		assert!(toolbar_setting("Settings").is_none());
 	}
 

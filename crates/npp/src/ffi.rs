@@ -73,6 +73,7 @@ pub mod menu_command {
 	use super::menu_cmd_id;
 
 	pub const FILE_NEW: usize = menu_cmd_id::IDM_FILE_NEW as usize;
+	pub const EDIT_PASTE: usize = menu_cmd_id::IDM_EDIT_PASTE as usize;
 }
 
 /// Document languages (`LangType`) for [`npp_message::SET_CURRENT_LANG_TYPE`].
@@ -143,6 +144,12 @@ pub mod scintilla_notification {
 	pub const MODIFIED: u32 = sci::SCN_MODIFIED;
 	/// [`super::SciNotification::updated`] tells what changed.
 	pub const UPDATE_UI: u32 = sci::SCN_UPDATEUI;
+	/// A double click, after the word there was selected. [`super::SciNotification::position`]
+	/// and `modifiers` are set.
+	pub const DOUBLE_CLICK: u32 = sci::SCN_DOUBLECLICK;
+	/// A text of a hotspot style was double-clicked, after the word there was selected and
+	/// after `SCN_DOUBLECLICK`. [`super::SciNotification::position`] and `modifiers` are set.
+	pub const HOTSPOT_DOUBLE_CLICK: u32 = sci::SCN_HOTSPOTDOUBLECLICK;
 }
 
 /// Flags of [`super::SciNotification::modification_type`] and [`super::SciNotification::updated`].
@@ -151,6 +158,9 @@ pub mod scintilla_change {
 
 	pub const INSERT_TEXT: i32 = sci::SC_MOD_INSERTTEXT as i32;
 	pub const DELETE_TEXT: i32 = sci::SC_MOD_DELETETEXT as i32;
+	/// An indicator was set or cleared in [`super::SciNotification::position`] and `length`.
+	/// Notepad++'s event mask includes it.
+	pub const CHANGE_INDICATOR: i32 = sci::SC_MOD_CHANGEINDICATOR as i32;
 	pub const SELECTION_UPDATED: i32 = sci::SC_UPDATE_SELECTION as i32;
 }
 
@@ -176,6 +186,8 @@ pub mod scintilla_message {
 	pub const LINE_FROM_POSITION: u32 = sci::SCI_LINEFROMPOSITION;
 	pub const POSITION_FROM_LINE: u32 = sci::SCI_POSITIONFROMLINE;
 	pub const REPLACE_TARGET: u32 = sci::SCI_REPLACETARGET;
+	/// `lParam`: NUL terminated text in the document encoding.
+	pub const REPLACE_SELECTION: u32 = sci::SCI_REPLACESEL;
 	pub const COUNT_CHARACTERS: u32 = sci::SCI_COUNTCHARACTERS;
 	pub const GET_SELECTION_EMPTY: u32 = sci::SCI_GETSELECTIONEMPTY;
 	pub const POSITION_RELATIVE: u32 = sci::SCI_POSITIONRELATIVE;
@@ -225,6 +237,23 @@ pub mod scintilla_message {
 	/// Font size in hundredths of a point.
 	pub const STYLE_SET_SIZE_FRACTIONAL: u32 = sci::SCI_STYLESETSIZEFRACTIONAL;
 	pub const STYLE_GET_SIZE_FRACTIONAL: u32 = sci::SCI_STYLEGETSIZEFRACTIONAL;
+	/// `wParam`: style, `lParam`: boolean. A hotspot shows a hand cursor and notifies clicks.
+	pub const STYLE_SET_HOTSPOT: u32 = sci::SCI_STYLESETHOTSPOT;
+	/// `wParam`: position. Returns a bit mask of the indicators set there.
+	pub const INDICATOR_ALL_ON_FOR: u32 = sci::SCI_INDICATORALLONFOR;
+	/// `wParam`: indicator, `lParam`: position. The value of the indicator there, 0 if unset.
+	pub const INDICATOR_VALUE_AT: u32 = sci::SCI_INDICATORVALUEAT;
+	/// `wParam`: indicator, `lParam`: position. The end of the run of equal values there.
+	pub const INDICATOR_END: u32 = sci::SCI_INDICATOREND;
+	/// `wParam`: indicator. The indicator that `INDICATOR_CLEAR_RANGE` changes.
+	pub const SET_INDICATOR_CURRENT: u32 = sci::SCI_SETINDICATORCURRENT;
+	pub const GET_INDICATOR_CURRENT: u32 = sci::SCI_GETINDICATORCURRENT;
+	/// `wParam`: start, `lParam`: length.
+	pub const INDICATOR_CLEAR_RANGE: u32 = sci::SCI_INDICATORCLEARRANGE;
+	/// The position up to which the lexer has styled the document.
+	pub const GET_END_STYLED: u32 = sci::SCI_GETENDSTYLED;
+	/// `wParam`: line. Unfolds and scrolls the line into view, by the visible policy.
+	pub const ENSURE_VISIBLE_ENFORCE_POLICY: u32 = sci::SCI_ENSUREVISIBLEENFORCEPOLICY;
 }
 
 /// Scintilla constants used as message arguments or results.
@@ -235,6 +264,14 @@ pub mod scintilla_constant {
 	pub const EOL_CRLF: isize = sci::SC_EOL_CRLF as isize;
 	pub const EOL_CR: isize = sci::SC_EOL_CR as isize;
 	pub const EOL_LF: isize = sci::SC_EOL_LF as isize;
+	/// The style whose attributes all others start from, the theme's default style in Notepad++.
+	pub const STYLE_DEFAULT: u8 = sci::STYLE_DEFAULT as u8;
+	/// No modifier key in [`super::SciNotification::modifiers`].
+	pub const MODIFIER_NONE: i32 = sci::SCMOD_NORM as i32;
+	/// Notepad++'s indicator of the URLs it makes clickable (`URL_INDIC` of
+	/// `ScintillaEditView.h`, not part of the plugin interface). Notepad++ opens them itself on a
+	/// double click.
+	pub const NOTEPAD_URL_INDICATOR: u32 = 8;
 }
 
 /// Docking panel constants (`Docking.h`, `dockingResource.h`).

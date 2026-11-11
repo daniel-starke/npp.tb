@@ -153,6 +153,14 @@ impl Scintilla {
 		range.start + bytes.len() as isize
 	}
 
+	/// Replaces the main selection by `text`, or inserts it at the caret, and moves the caret
+	/// after it.
+	pub fn replace_selection(&self, text: &str) {
+		let mut bytes = self.encode(text);
+		bytes.push(0);
+		self.send_message(scintilla_message::REPLACE_SELECTION, 0, bytes.as_ptr() as LPARAM);
+	}
+
 	/// Replaces whole lines (excluding the line ending after the last one) with `new_lines`
 	/// joined by the document's line ending. Returns the position after the inserted text.
 	pub fn replace_lines(&self, lines: Range<usize>, new_lines: &[String]) -> isize {
@@ -275,6 +283,11 @@ impl Scintilla {
 		self.send_message(scintilla_message::STYLE_SET_FORE, usize::from(style), color as LPARAM);
 	}
 
+	/// Sets the background color of `style` (`0xBBGGRR`).
+	pub fn set_style_background(&self, style: u8, color: u32) {
+		self.send_message(scintilla_message::STYLE_SET_BACK, usize::from(style), color as LPARAM);
+	}
+
 	pub fn set_style_font_style(
 		&self,
 		style: u8,
@@ -290,6 +303,75 @@ impl Scintilla {
 			style,
 			LPARAM::from(is_underlined),
 		);
+	}
+
+	/// Makes the text of `style` a hotspot: a hand cursor over it, underlined while hovered, and
+	/// `SCN_HOTSPOT*` notifications for clicks on it.
+	pub fn set_style_hotspot(&self, style: u8, is_hotspot: bool) {
+		self.send_message(
+			scintilla_message::STYLE_SET_HOTSPOT,
+			usize::from(style),
+			LPARAM::from(is_hotspot),
+		);
+	}
+
+	/// Whether `indicator` is set at `position`, whatever its value.
+	pub fn has_indicator_at(&self, indicator: u32, position: isize) -> bool {
+		let indicators =
+			self.send_message(scintilla_message::INDICATOR_ALL_ON_FOR, position as WPARAM, 0);
+		indicator < 32 && indicators & (1 << indicator) != 0
+	}
+
+	/// The runs of `indicator` that overlap `range`, each in full.
+	pub fn indicator_runs(&self, indicator: u32, range: Range<isize>) -> Vec<Range<isize>> {
+		let mut runs = Vec::new();
+		let mut position = range.start;
+		while position < range.end {
+			let run_end =
+				self.send_message(scintilla_message::INDICATOR_END, indicator as WPARAM, position);
+			if run_end <= position {
+				break;
+			}
+			let value = self.send_message(
+				scintilla_message::INDICATOR_VALUE_AT,
+				indicator as WPARAM,
+				position,
+			);
+			if value != 0 {
+				runs.push(position..run_end);
+			}
+			position = run_end;
+		}
+		runs
+	}
+
+	/// Clears `indicator` in `range`, keeping the current indicator of other callers.
+	pub fn clear_indicator(&self, indicator: u32, range: Range<isize>) {
+		let current = self.send_message(scintilla_message::GET_INDICATOR_CURRENT, 0, 0);
+		self.send_message(scintilla_message::SET_INDICATOR_CURRENT, indicator as WPARAM, 0);
+		self.send_message(
+			scintilla_message::INDICATOR_CLEAR_RANGE,
+			range.start as WPARAM,
+			range.end - range.start,
+		);
+		self.send_message(scintilla_message::SET_INDICATOR_CURRENT, current as WPARAM, 0);
+	}
+
+	/// The position up to which the lexer has styled the document.
+	pub fn end_styled(&self) -> isize {
+		self.send_message(scintilla_message::GET_END_STYLED, 0, 0)
+	}
+
+	/// The position after the first `characters` characters of the document.
+	pub fn position_of_character(&self, characters: usize) -> isize {
+		self.send_message(scintilla_message::POSITION_RELATIVE, 0, characters as LPARAM)
+	}
+
+	/// Moves the caret to `position`, unfolding and scrolling its line into view.
+	pub fn show_position(&self, position: isize) {
+		let line = self.line_of_position(position);
+		self.send_message(scintilla_message::ENSURE_VISIBLE_ENFORCE_POLICY, line, 0);
+		self.move_caret_to(position);
 	}
 
 	/// Whether the background of `style` fills the rest of the line after its last character.

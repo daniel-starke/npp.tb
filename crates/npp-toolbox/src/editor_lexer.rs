@@ -4,8 +4,10 @@
 //! `plugins/Config/NppToolBox.xml`. Code blocks are styled by Notepad++'s lexer of their
 //! language, run on a [`MappedDocument`] that moves its styles to free style numbers from
 //! [`FIRST_CODE_STYLE`] on. Notepad++ knows nothing about these styles, so the plugin gives them
-//! the colors of the language in the current theme, with the font and background of the
-//! `CODE BLOCK` style, each time Notepad++ has reset the styles of an editor.
+//! the colors of the language in the current theme, with the font of the `CODE BLOCK` style,
+//! each time Notepad++ has reset the styles of an editor. A style whose theme background is the
+//! theme's default background takes the background of `CODE BLOCK` instead. The `URL` style
+//! becomes a hotspot, whose links `editor_links` opens.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -465,7 +467,9 @@ unsafe extern "system" fn apply_code_styles_now(
 }
 
 /// Gives the code block styles of the editors showing a document with the lexer the colors and
-/// font styles of their language in the theme, and the font and background of `CODE BLOCK`.
+/// font styles of their language in the theme, and the font of `CODE BLOCK`. Backgrounds that
+/// the theme sets apart from its default background are kept, all others are the background of
+/// `CODE BLOCK`, so that the code block stands out as a whole.
 fn apply_code_styles(notepad: &Notepad) {
 	let code_styles = CODE_STYLES.with_borrow(|styles| styles.styles.clone());
 	let theme_styles: Vec<Option<StylerEntry>> = with_configuration(notepad, |configuration| {
@@ -484,6 +488,8 @@ fn apply_code_styles(notepad: &Notepad) {
 			continue;
 		}
 		let code_color = editor.style_foreground(style::CODE_BLOCK);
+		let default_background = editor.style_background(scintilla_constant::STYLE_DEFAULT);
+		editor.set_style_hotspot(style::URL, true);
 		for code_style in [style::CODE_BLOCK, style::CODE_FENCE] {
 			editor.set_style_eol_filled(code_style, true);
 		}
@@ -493,6 +499,12 @@ fn apply_code_styles(notepad: &Notepad) {
 			let color =
 				theme_style.as_ref().and_then(|entry| entry.color).map_or(code_color, rgb_to_bgr);
 			editor.copy_style_font_and_background(style::CODE_BLOCK, style);
+			let background =
+				theme_style.as_ref().and_then(|entry| entry.background).map(rgb_to_bgr);
+			let own_background = background.filter(|&color| color != default_background);
+			if let Some(background) = own_background {
+				editor.set_style_background(style, background);
+			}
 			editor.set_style_foreground(style, color);
 			editor.set_style_font_style(
 				style,
@@ -500,7 +512,9 @@ fn apply_code_styles(notepad: &Notepad) {
 				font_style & 2 != 0,
 				font_style & 4 != 0,
 			);
-			editor.set_style_eol_filled(style, true);
+			// Like Notepad++ does in a file of the language, an own background ends with the
+			// text of its line, while the code block background fills the line.
+			editor.set_style_eol_filled(style, own_background.is_none());
 		}
 	}
 }

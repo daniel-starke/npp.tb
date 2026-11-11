@@ -7,10 +7,13 @@
 
 mod base64;
 mod clipboard_html;
+mod clipboard_image;
 mod code_highlight;
 mod comment_selection;
 #[cfg(windows)]
 mod editor_lexer;
+#[cfg(windows)]
+mod editor_links;
 mod emoji;
 mod emoji_table;
 mod image_embedding;
@@ -18,6 +21,7 @@ mod image_embedding;
 mod lexer_highlighter;
 mod markdown_html;
 mod markdown_lexer;
+mod markdown_links;
 mod markdown_rtf;
 mod markdown_table;
 mod mermaid;
@@ -77,6 +81,12 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 			shortcut: Some(Shortcut::ctrl_alt(b'N')),
 			toolbar_icon: Some(&toolbar_icons::SELECT_COMMENTS),
 		}),
+		MenuEntry::Command(Command {
+			menu_name: "Paste Embedded Image",
+			run: commands::paste_embedded_image,
+			shortcut: Some(Shortcut::ctrl_shift(b'I')),
+			toolbar_icon: Some(&toolbar_icons::PASTE_EMBEDDED_IMAGE),
+		}),
 		MenuEntry::Separator,
 		MenuEntry::Command(Command {
 			menu_name: "Render HTML",
@@ -104,7 +114,7 @@ static PLUGIN: PluginDefinition = PluginDefinition {
 			toolbar_icon: None,
 		}),
 		MenuEntry::Command(Command {
-			menu_name: "About",
+			menu_name: "About...",
 			run: commands::about,
 			shortcut: None,
 			toolbar_icon: None,

@@ -4,6 +4,14 @@ M.N.P
 | +---- minor: increased if syntax/semantic breaking changes were applied
 +------ major: increased if elementary changes (from user's point of view) were made
 
+3.1.0 (2026-11-11)
+ - added: Paste Embedded Image (Ctrl+Shift+I, toolbar icon off by default) pastes the clipboard image as <img> with data: URI
+ - added: double-clicking a link destination in the Markdown (NppToolBox) language opens the link
+ - changed: parentheses, angle brackets and titles around link destinations no longer take the URL style
+ - changed: About menu entry is named About... because it opens a window
+ - fixed: code blocks in the Markdown (NppToolBox) language show the backgrounds of their theme styles
+ - fixed: double click on a link destination in the Markdown (NppToolBox) language opens the destination, not the URL Notepad++ detects there, which can take in the characters after it
+
 3.0.0 (2026-11-08)
  - added: Mermaid diagrams drawn in Render HTML, Copy as HTML and the Markdown Viewer
  - added: all diagram types of Mermaid 12.2.0, including the beta ones, with an own renderer

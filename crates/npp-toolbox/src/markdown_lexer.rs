@@ -106,7 +106,13 @@ pub const STYLES: [MarkdownStyle; 26] = [
 	markdown_style(c"TASK MARKER", c"list marker", c"[ ] or [x] of a task", MARKER_COLOR, BOLD),
 	markdown_style(c"LINK", c"link", c"[Link text]", LINK_COLOR, 0),
 	markdown_style(c"IMAGE", c"link image", c"![Image description]", LINK_COLOR, 0),
-	markdown_style(c"URL", c"link url", c"(destination) and <autolinks>", MUTED_COLOR, UNDERLINE),
+	markdown_style(
+		c"URL",
+		c"link url",
+		c"Destination of a link, image, <autolink> or reference definition. A double click opens it.",
+		MUTED_COLOR,
+		UNDERLINE,
+	),
 	markdown_style(c"HTML", c"html", c"Raw HTML", Some(0xB07000), 0),
 	markdown_style(c"HORIZONTAL RULE", c"rule", c"--- or ***", MUTED_COLOR, BOLD),
 	markdown_style(c"TABLE", c"table", c"| and delimiter row of a table", MUTED_COLOR, 0),
@@ -255,7 +261,10 @@ pub(crate) fn lex_slice(
 	}
 	drop(events);
 	for definition in reference_definitions(text.as_bytes(), slice.clone(), &styler.covered) {
-		styler.paint(definition, style::URL);
+		styler.paint(definition.clone(), style::LINK);
+		if let Some(destination) = definition_destination(text.as_bytes(), definition) {
+			styler.paint(destination, style::URL);
+		}
 	}
 	let shift = |range: &Range<usize>| {
 		range.start.clamp(slice.start, slice.end) - slice.start
@@ -310,6 +319,69 @@ fn reference_definitions(
 		}
 	}
 	definitions
+}
+
+/// The destination in a link reference definition `[label]: destination "title"` starting at
+/// `definition.start`, if the label ends on the first line.
+fn definition_destination(text: &[u8], definition: Range<usize>) -> Option<Range<usize>> {
+	let mut position = definition.start + 1;
+	while position < definition.end {
+		match text[position] {
+			b'\\' => position += 2,
+			b']' => break,
+			_ => position += 1,
+		}
+	}
+	let colon = position + 1;
+	if colon >= definition.end || text[colon] != b':' {
+		return None;
+	}
+	link_destination(text, colon + 1..definition.end)
+}
+
+/// The destination at the start of `range` after optional white space, as CommonMark reads it:
+/// the text between `<` and `>`, or up to white space or an unbalanced `)`. After a line break,
+/// the markers of an enclosing quote are skipped as well.
+fn link_destination(text: &[u8], range: Range<usize>) -> Option<Range<usize>> {
+	let end = range.end.min(text.len());
+	let mut position = range.start;
+	let mut is_after_line_break = false;
+	while position < end {
+		match text[position] {
+			b' ' | b'\t' => {}
+			b'\r' | b'\n' => is_after_line_break = true,
+			b'>' if is_after_line_break => {}
+			_ => break,
+		}
+		position += 1;
+	}
+	let start = position;
+	if text.get(start) == Some(&b'<') {
+		let mut position = start + 1;
+		while position < end {
+			match text[position] {
+				b'\\' => position += 2,
+				b'>' => return Some(start + 1..position),
+				b'<' | b'\r' | b'\n' => return None,
+				_ => position += 1,
+			}
+		}
+		return None;
+	}
+	let mut open_parentheses = 0usize;
+	while position < end {
+		match text[position] {
+			b'\\' if text.get(position + 1).is_some_and(u8::is_ascii_punctuation) => position += 1,
+			b'(' => open_parentheses += 1,
+			b')' if open_parentheses == 0 => break,
+			b')' => open_parentheses -= 1,
+			byte if byte.is_ascii_whitespace() || byte.is_ascii_control() => break,
+			_ => {}
+		}
+		position += 1;
+	}
+	let destination = start..position.min(end);
+	(!destination.is_empty()).then_some(destination)
 }
 
 /// Ranges asked about at increasing positions, in time linear in their number.
@@ -586,13 +658,31 @@ impl<'text> Styler<'text> {
 			TagEnd::TableHead => self.is_in_table_head = false,
 			TagEnd::Link | TagEnd::Image => {
 				let Some(link) = self.links.pop() else { return };
+				let bytes = self.text.as_bytes();
+				let range = link.range;
 				if link.is_autolink {
+					// `<` and `>` keep the style of the link text.
+					if bytes.get(range.start) == Some(&b'<') && range.len() >= 2 {
+						self.paint(range.start..range.start + 1, style::LINK);
+						self.paint(range.end - 1..range.end, style::LINK);
+					}
 					return;
 				}
-				// The destination or reference follows the `]` closing the text.
-				let text_end = link.text_end.min(link.range.end);
-				if let Some(bracket) = self.text[text_end..link.range.end].find(']') {
-					self.paint(text_end + bracket + 1..link.range.end, style::URL);
+				// The destination or reference follows the `]` closing the text. Only the
+				// destination or the reference label is a URL, not the brackets and the title.
+				let text_end = link.text_end.min(range.end);
+				let Some(bracket) = self.text[text_end..range.end].find(']') else { return };
+				let opener = text_end + bracket + 1;
+				match bytes.get(opener) {
+					Some(b'(') if opener < range.end => {
+						if let Some(destination) = link_destination(bytes, opener + 1..range.end) {
+							self.paint(destination, style::URL);
+						}
+					}
+					Some(b'[') if opener + 1 < range.end && bytes[range.end - 1] == b']' => {
+						self.paint(opener + 1..range.end - 1, style::URL);
+					}
+					_ => {}
 				}
 			}
 			TagEnd::CodeBlock => {
@@ -754,19 +844,51 @@ mod tests {
 		let text = "See [the *docs*](https://example.com \"Title\") and <https://a.b>.\n";
 		assert_eq!(styles_of(text, "[the "), uniform(LINK, 5));
 		assert_eq!(styles_of(text, "*docs*"), uniform(EMPHASIS, 6));
-		assert_eq!(styles_of(text, "](https"), [vec![LINK], uniform(URL, 6)].concat());
-		assert_eq!(styles_of(text, "\"Title\")"), uniform(URL, 8));
-		assert_eq!(styles_of(text, "<https://a.b>"), uniform(URL, 13));
+		assert_eq!(styles_of(text, "]("), uniform(LINK, 2));
+		assert_eq!(styles_of(text, "https://example.com"), uniform(URL, 19));
+		assert_eq!(styles_of(text, " \"Title\")"), uniform(LINK, 9));
+		assert_eq!(
+			styles_of(text, "<https://a.b>"),
+			[vec![LINK], uniform(URL, 11), vec![LINK]].concat()
+		);
 		let image = "![alt `]` text](i.png)\n";
 		assert_eq!(styles_of(image, "![alt "), uniform(IMAGE, 6));
 		assert_eq!(styles_of(image, "`]`"), uniform(INLINE_CODE, 3));
 		assert_eq!(styles_of(image, " text]"), uniform(IMAGE, 6));
-		assert_eq!(styles_of(image, "(i.png)"), uniform(URL, 7));
-		let reference = "[a][b] [b]\n\n[b]: https://example.com\n> - [b]: /again\n";
+		assert_eq!(
+			styles_of(image, "(i.png)"),
+			[vec![IMAGE], uniform(URL, 5), vec![IMAGE]].concat()
+		);
+		let reference = "[a][b] [b]\n\n[b]: https://example.com\n> - [b]: /again 'Title'\n";
 		assert_eq!(styles_of(reference, "[a]"), uniform(LINK, 3));
-		assert_eq!(styles_of(reference, "[b] "), [uniform(URL, 3), vec![DEFAULT]].concat());
-		assert_eq!(styles_of(reference, "[b]: https://example.com"), uniform(URL, 24));
-		assert_eq!(styles_of(reference, "[b]: /again"), uniform(URL, 11));
+		assert_eq!(styles_of(reference, "[b] "), [vec![LINK, URL, LINK], vec![DEFAULT]].concat());
+		assert_eq!(
+			styles_of(reference, "[b]: https://example.com"),
+			[uniform(LINK, 5), uniform(URL, 19)].concat()
+		);
+		assert_eq!(
+			styles_of(reference, "[b]: /again 'Title'"),
+			[uniform(LINK, 5), uniform(URL, 6), uniform(LINK, 8)].concat()
+		);
+	}
+
+	#[test]
+	fn styles_only_the_destination_as_url() {
+		let url = |text: &str| -> String {
+			let lexed = lex_text(text);
+			text.char_indices()
+				.filter(|&(index, _)| lexed.styles[index] == URL)
+				.map(|(_, character)| character)
+				.collect()
+		};
+		assert_eq!(url("[a](<my file.md> \"t\")\n"), "my file.md");
+		assert_eq!(url("[a](x_(1\\)).md)\n"), "x_(1\\)).md");
+		assert_eq!(url("[a](\n  b.md\n)\n"), "b.md");
+		assert_eq!(url("> [a](\n> b.md)\n"), "b.md");
+		assert_eq!(url("[a]()\n"), "");
+		assert_eq!(url("[a][]\n\n[a]: <x y>\n"), "x y");
+		assert_eq!(url("[a]\n\n[a]:\n  next-line.md\n"), "");
+		assert_eq!(url("<me@example.com>\n"), "me@example.com");
 	}
 
 	#[test]

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use npp::clipboard::{ClipboardContent, set_clipboard};
+use npp::clipboard::{ClipboardContent, ClipboardReader, format, read_clipboard, set_clipboard};
 use npp::ffi::SciNotification;
 use npp::ffi::language;
 use npp::ini_file::IniFile;
@@ -12,6 +12,10 @@ use npp::{Command, MessageKind, Notepad, Scintilla};
 
 use crate::PLUGIN_NAME;
 use crate::clipboard_html::clipboard_html;
+use crate::clipboard_image::{
+	ClipboardFormat, ClipboardImage, Pixels, clipboard_image, embedded_images,
+	formats_by_preference, img_tag,
+};
 use crate::code_highlight::{info_language_of, lexer_styles};
 use crate::comment_selection::{comment_ranges, is_comment_style};
 use crate::image_embedding::ImageEmbedding;
@@ -27,7 +31,7 @@ use crate::markdown_table::{
 use crate::mermaid::DiagramRenderer;
 use crate::rewrap::{DocumentSyntax, RewrapSettings, paragraph_at, rewrap_range};
 use crate::settings::{self, SETTINGS_FILE_NAME, Setting};
-use crate::{editor_lexer, viewer};
+use crate::{editor_lexer, editor_links, viewer};
 use crate::{mermaid_clock, mermaid_image, mermaid_text};
 pub(crate) const MARKDOWN_EXTENSIONS: [&str; 7] =
 	["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt"];
@@ -189,6 +193,62 @@ pub fn select_comments(notepad: &Notepad) {
 	editor.select_ranges(&comments);
 }
 
+/// Replaces the selection by the image on the clipboard as `<img>` tag with a `data:` URI, one
+/// per line for several copied image files. Without an image on the clipboard, pastes as usual.
+pub fn paste_embedded_image(notepad: &Notepad) {
+	let editor = notepad.current_scintilla();
+	if editor.is_read_only() {
+		return;
+	}
+	let Some(image) = read_clipboard(notepad, image_on_clipboard) else {
+		notepad.show_message(
+			PLUGIN_NAME,
+			"The clipboard is in use by another program. Please try again.",
+			MessageKind::Warning,
+		);
+		return;
+	};
+	let Some(image) = image else {
+		notepad.paste();
+		return;
+	};
+	let max_size = u64::from(read_setting(
+		settings_file(notepad).as_ref(),
+		&settings::MAX_EMBEDDED_IMAGE_BYTES,
+	));
+	let encode_png =
+		|pixels: &Pixels| npp::png::encode_straight_bgra(pixels.width, pixels.height, &pixels.bgra);
+	match embedded_images(image, max_size, encode_png) {
+		Ok(images) => {
+			let tags: Vec<String> = images.iter().map(img_tag).collect();
+			editor.replace_selection(&tags.join(editor.line_ending().as_str()));
+		}
+		Err(error) => {
+			notepad.show_message(PLUGIN_NAME, &error.to_string(), MessageKind::Warning);
+		}
+	}
+}
+
+/// The most preferred image on the open clipboard.
+fn image_on_clipboard(clipboard: &ClipboardReader) -> Option<ClipboardImage> {
+	let codes = clipboard.formats();
+	let names: Vec<Option<String>> =
+		codes.iter().map(|&code| clipboard.format_name(code)).collect();
+	let formats: Vec<ClipboardFormat> = codes
+		.iter()
+		.zip(&names)
+		.map(|(&code, name)| match code {
+			format::FILE_DROP => ClipboardFormat::FileDrop,
+			format::DIB | format::DIB_V5 => ClipboardFormat::Bitmap,
+			format::UNICODE_TEXT => ClipboardFormat::UnicodeText,
+			_ => name.as_deref().map_or(ClipboardFormat::Other, ClipboardFormat::Registered),
+		})
+		.collect();
+	formats_by_preference(&formats)
+		.into_iter()
+		.find_map(|index| clipboard_image(formats[index], &clipboard.data(codes[index])?))
+}
+
 /// Renders the selection, or the whole document, into a new HTML document.
 pub fn render_html(notepad: &Notepad) {
 	let text = selected_or_whole_text(&notepad.current_scintilla());
@@ -230,6 +290,7 @@ pub fn markdown_viewer(notepad: &Notepad) {
 pub fn on_notification(notepad: &Notepad, notification: &SciNotification) {
 	viewer::on_notification(notepad, notification);
 	editor_lexer::on_notification(notepad, notification);
+	editor_links::on_notification(notepad, notification);
 }
 
 /// The `[Toolbar]` settings select the icons. Commands without a setting always show theirs.

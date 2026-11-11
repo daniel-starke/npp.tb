@@ -142,7 +142,7 @@ fn percent_decode(text: &str) -> Option<String> {
 
 /// Media type by file extension: formats browsers and Office display, and without the
 /// `pure-rust` feature formats that the RichEdit viewer converts with WIC codecs of Windows.
-fn media_type_of(path: &Path) -> Option<&'static str> {
+pub(crate) fn media_type_of(path: &Path) -> Option<&'static str> {
 	let extension = path.extension()?.to_str()?.to_ascii_lowercase();
 	Some(match extension.as_str() {
 		"png" => "image/png",

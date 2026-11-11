@@ -11,6 +11,8 @@ x86 and x64.
   to a maximum number of characters per line. The common line prefix is kept.
 - **Select Comments** (`Ctrl+Alt+N`, toolbar icon off by default): selects all comments in the
   selection, or in the whole document, as Notepad++'s syntax highlighting recognizes them.
+- **Paste Embedded Image** (`Ctrl+Shift+I`, toolbar icon off by default): pastes the image or SVG
+  on the clipboard as HTML `<img>` tag with the image embedded as Base64 `data:` URI.
 - **Render HTML** (`Ctrl+Alt+H`, toolbar icon off by default): renders the selected Markdown, or
   the whole document, into a new unsaved HTML document that looks like GitHub. Code in another
   language becomes a highlighted code block.
@@ -85,6 +87,19 @@ comment becomes one of multiple selections, so they can be edited, deleted or co
   includes its line ending or not.
 - Comments partly inside the selection are selected up to the selection boundary.
 - Without comments, the selection stays unchanged.
+
+### Paste Embedded Image
+
+Copy an image in any application, then run the command to replace the selection by
+`<img src="data:image/png;base64,...">`. Markdown documents show it like any HTML image.
+
+- The clipboard is read in this order: image files copied in Explorer (one tag per line), SVG
+  (`image/svg+xml`), PNG, JPEG, GIF and WebP data (kept in their format, the copying application's
+  order decides between them), bitmaps (converted to PNG) and at last text that is an SVG document,
+  e.g. SVG markup copied from an editor or with "Copy as SVG".
+- Copied image files get their file name without extension as `alt` text, other images no `alt`.
+- Without an image on the clipboard, the command pastes as usual.
+- Images larger than `[Html] MaxEmbeddedImageBytes` are refused with a message.
 
 ### Render HTML and Copy as HTML
 
@@ -237,9 +252,17 @@ quotes, list and task markers, links, images and their destinations, raw HTML, r
 footnotes, math and YAML front matter. Blocks are restyled as a whole while you type, so a line
 becomes a heading as soon as you underline it with `===`.
 
+Link destinations are clickable: the `URL` style covers the destination of links, images,
+`<autolinks>` and link reference definitions, without the parentheses, angle brackets and title
+around it, and a double click on it opens the link like a URL in Notepad++. Reference links
+(`[text][label]`) open the destination of their definition. Web addresses open in the default
+browser, local files relative to the document in Notepad++ (other file types in their default
+application) and `#heading-text` moves the caret to that heading.
+
 Code blocks with a language (` ```rust `) are colored by the Notepad++ lexer of that language, with
 its keywords and its colors in the current theme (light or dark mode), on the font and background of
-the `CODE BLOCK` style. The languages are the ones of Render HTML. Other code blocks take the `CODE
+the `CODE BLOCK` style. Styles with their own background in the theme (one other than the theme's
+default background) keep it. The languages are the ones of Render HTML. Other code blocks take the `CODE
 BLOCK` style.
 
 Notepad++ uses the language for the extensions `md`, `markdown`, `mdown`, `mkd`, `mkdn`, `mdwn` and
@@ -280,6 +303,7 @@ next time a command runs, no restart is needed.
 | `[Toolbar]` | `CompactMarkdownTable`  | `0`        | As above.                                                         |
 | `[Toolbar]` | `Rewrap`                | `1`        | As above.                                                         |
 | `[Toolbar]` | `SelectComments`        | `0`        | As above.                                                         |
+| `[Toolbar]` | `PasteEmbeddedImage`    | `0`        | As above.                                                         |
 | `[Toolbar]` | `RenderHtml`            | `0`        | As above.                                                         |
 | `[Toolbar]` | `CopyAsHtml`            | `1`        | As above.                                                         |
 | `[Toolbar]` | `MarkdownViewer`        | `1`        | As above.                                                         |

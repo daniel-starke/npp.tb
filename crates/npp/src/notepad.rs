@@ -140,6 +140,11 @@ impl Notepad {
 		self.send_message(npp_message::MENU_COMMAND, 0, menu_command::FILE_NEW as LPARAM);
 	}
 
+	/// Runs Notepad++'s own Paste command on the active editor.
+	pub fn paste(&self) {
+		self.send_message(npp_message::MENU_COMMAND, 0, menu_command::EDIT_PASTE as LPARAM);
+	}
+
 	/// Name of the active document's language in `langs.xml` and `stylers.xml`, e.g. `cpp` or
 	/// `udf` for user defined languages. `None` if Notepad++ reports an unknown language.
 	pub fn current_language_name(&self) -> Option<String> {

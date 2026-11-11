@@ -70,6 +70,10 @@ impl Shortcut {
 		Self { ctrl: true, alt: true, shift: false, key }
 	}
 
+	pub const fn ctrl_shift(key: u8) -> Self {
+		Self { ctrl: true, alt: false, shift: true, key }
+	}
+
 	pub const fn ctrl_alt_shift(key: u8) -> Self {
 		Self { ctrl: true, alt: true, shift: true, key }
 	}

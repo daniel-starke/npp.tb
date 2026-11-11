@@ -376,12 +376,16 @@ pub struct StylerEntry {
 	pub extra_keywords: String,
 	/// The text color (`0xRRGGBB`), unless the style takes the default one (`colorStyle`).
 	pub color: Option<u32>,
+	/// The background color (`0xRRGGBB`), unless the style takes the default one (`colorStyle`).
+	pub background: Option<u32>,
 	/// `fontStyle`: 1 bold, 2 italic, 4 underlined.
 	pub font_style: u8,
 }
 
 /// Notepad++'s `COLORSTYLE_FOREGROUND` bit of `colorStyle`.
 const COLOR_STYLE_FOREGROUND: u32 = 1;
+/// Notepad++'s `COLORSTYLE_BACKGROUND` bit of `colorStyle`.
+const COLOR_STYLE_BACKGROUND: u32 = 2;
 
 /// The styles of a language's lexer in Notepad++'s `stylers.xml`.
 pub fn lexer_styles(stylers_xml: &str, notepad_name: &str) -> Vec<StylerEntry> {
@@ -401,14 +405,19 @@ pub fn lexer_styles(stylers_xml: &str, notepad_name: &str) -> Vec<StylerEntry> {
 					attribute(attributes, "colorStyle").and_then(|bits| bits.parse().ok());
 				let has_color =
 					color_style.is_none_or(|bits: u32| bits & COLOR_STYLE_FOREGROUND != 0);
+				let has_background =
+					color_style.is_none_or(|bits: u32| bits & COLOR_STYLE_BACKGROUND != 0);
+				let color_of = |name: &str| {
+					attribute(attributes, name)
+						.and_then(|color| u32::from_str_radix(color.trim(), 16).ok())
+				};
 				let entry = StylerEntry {
 					style_id,
 					name: attribute(attributes, "name").unwrap_or_default(),
 					keyword_list: attribute(attributes, "keywordClass"),
 					extra_keywords: String::new(),
-					color: attribute(attributes, "fgColor")
-						.and_then(|color| u32::from_str_radix(color.trim(), 16).ok())
-						.filter(|_| has_color),
+					color: color_of("fgColor").filter(|_| has_color),
+					background: color_of("bgColor").filter(|_| has_background),
 					font_style: attribute(attributes, "fontStyle")
 						.and_then(|bits| bits.trim().parse().ok())
 						.unwrap_or(0),
@@ -655,8 +664,9 @@ mod tests {
 	fn reads_styles_from_stylers_xml() {
 		let stylers = r#"<NotepadPlus><LexerStyles>
 	<LexerType name="cpp" desc="C++" ext="">
-		<WordsStyle name="PREPROCESSOR" styleID="9" fgColor="804000" />
-		<WordsStyle name="INSTRUCTION WORD" styleID="5" fgColor="0000FF" colorStyle="2" fontStyle="1" keywordClass="instre1">my_keyword</WordsStyle>
+		<WordsStyle name="PREPROCESSOR" styleID="9" fgColor="804000" bgColor="FFFFFF" />
+		<WordsStyle name="INSTRUCTION WORD" styleID="5" fgColor="0000FF" bgColor="E0E0FF" colorStyle="2" fontStyle="1" keywordClass="instre1">my_keyword</WordsStyle>
+		<WordsStyle name="NUMBER" styleID="4" fgColor="FF8000" bgColor="FFE0E0" colorStyle="1" />
 		<WordsStyle name="BROKEN" styleID="x" />
 	</LexerType>
 	<LexerType name="c"><WordsStyle name="OTHER" styleID="1" /></LexerType>
@@ -668,6 +678,7 @@ mod tests {
 					style_id: 9,
 					name: "PREPROCESSOR".to_owned(),
 					color: Some(0x804000),
+					background: Some(0xFFFFFF),
 					..StylerEntry::default()
 				},
 				StylerEntry {
@@ -675,7 +686,14 @@ mod tests {
 					name: "INSTRUCTION WORD".to_owned(),
 					keyword_list: Some("instre1".to_owned()),
 					extra_keywords: "my_keyword".to_owned(),
+					background: Some(0xE0E0FF),
 					font_style: 1,
+					..StylerEntry::default()
+				},
+				StylerEntry {
+					style_id: 4,
+					name: "NUMBER".to_owned(),
+					color: Some(0xFF8000),
 					..StylerEntry::default()
 				},
 			]

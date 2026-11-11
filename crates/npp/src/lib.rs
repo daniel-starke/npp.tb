@@ -1,13 +1,14 @@
 //! Minimal framework for Notepad++ plugins written in Rust.
 //!
-//! The platform independent modules (`icon`, `interface`, `line_ending`, `sort`, `svg`, `wide`, `ffi` constants) compile
-//! everywhere so that plugin logic can be unit tested on any host. Everything touching Win32 is
-//! only available on Windows.
+//! The platform independent modules (`icon`, `interface`, `line_ending`, `png`, `sort`, `svg`,
+//! `wide`, `ffi` constants) compile everywhere so that plugin logic can be unit tested on any host.
+//! Everything touching Win32 is only available on Windows.
 
 pub mod ffi;
 pub mod icon;
 pub mod interface;
 pub mod line_ending;
+pub mod png;
 pub mod sort;
 pub mod svg;
 pub mod wide;

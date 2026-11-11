@@ -25,12 +25,12 @@ Rust. MIT licensed, author Daniel Starke.
 | `crates/xtask`                          | Development tasks run with `cargo xtask` (build, interface/emoji, icons).  |
 
 Inside `npp-toolbox`, the editing logic (`markdown_table.rs`, `rewrap.rs`, `text_width.rs`,
-`comment_selection.rs`), the Markdown styles of the editor (`markdown_lexer.rs`), the HTML rendering (`markdown_html/`, `code_highlight.rs`,
+`comment_selection.rs`), the Markdown styles and links of the editor (`markdown_lexer.rs`, `markdown_links.rs`), the HTML rendering (`markdown_html/`, `code_highlight.rs`,
 `image_embedding.rs`, `clipboard_html.rs`, `emoji.rs`, `settings.rs`), the RTF rendering for
 RichEdit (`markdown_rtf.rs`), the viewer page, scripts and link mapping (`viewer_page.rs`) and the
 SMIL to CSS conversion of SVG images for EdgeHTML (`svg_animation.rs`) and the Mermaid diagrams
 (`mermaid.rs`, `mermaid/`) are pure Rust without Win32 code. `commands.rs`, `lexer_highlighter.rs`,
-the editor lexer (`editor_lexer.rs`) and the Markdown viewer (`viewer.rs`, `viewer/`)
+the editor lexer and its links (`editor_lexer.rs`, `editor_links.rs`) and the Markdown viewer (`viewer.rs`, `viewer/`)
 connect them to the editor and are `#[cfg(windows)]`. The framework crate `npp` provides the
 Lexilla lexer interfaces (`lexer.rs`: `ILexer5` in Rust, `IDocument`, foreign lexers), the
 WebView2 binding (`webview2.rs`, `webview2/`), the EdgeHTML binding (`edge_html.rs`,

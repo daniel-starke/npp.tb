@@ -367,10 +367,17 @@ fn link_activated(link: LinkSource) {
 	}) else {
 		return;
 	};
+	if let Some(target) = target {
+		open_link_target(&notepad, target);
+	}
+}
+
+/// Opens a web page or file a link refers to. Anchors are left to the caller.
+pub(crate) fn open_link_target(notepad: &Notepad, target: LinkTarget) {
 	match target {
-		Some(LinkTarget::External(url)) => window::open_with_default_application(url.as_ref()),
-		Some(LinkTarget::File(path)) => open_file(&notepad, &path),
-		Some(LinkTarget::Anchor(_) | LinkTarget::Ignored) | None => {}
+		LinkTarget::External(url) => window::open_with_default_application(url.as_ref()),
+		LinkTarget::File(path) => open_file(notepad, &path),
+		LinkTarget::Anchor(_) | LinkTarget::Ignored => {}
 	}
 }
 
